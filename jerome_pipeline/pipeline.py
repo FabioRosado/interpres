@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -51,10 +52,11 @@ from .schemas import (
 )
 from .source import split_sentences
 from .witnesses import (
+    WITNESS_QUORUM_POLICY_VERSION,
     WITNESS_VALIDATION_POLICY_VERSION,
-    parse_witness_proposal,
+    estimate_witness_output_budget,
+    parse_plain_witness_proposal,
     validate_witness_record,
-    witness_contract_schema,
     witness_gate_receipt,
 )
 
@@ -76,7 +78,7 @@ STAGE_ORDER = [
     "adjudicator",
     "finalize",
 ]
-FINALIZATION_POLICY_VERSION = 5
+FINALIZATION_POLICY_VERSION = 6
 
 
 class ModelOutputError(ValueError):
@@ -131,6 +133,15 @@ class WitnessGateError(RuntimeError):
         super().__init__(
             "Witness validation failed closed before prosecution: "
             + ", ".join(receipt.get("invalid_witnesses", []))
+        )
+        self.receipt = receipt
+
+
+class WitnessOutputBudgetError(RuntimeError):
+    def __init__(self, receipt: dict[str, Any]):
+        super().__init__(
+            receipt.get("failure_reason")
+            or "Witness response cannot fit the configured completion budget"
         )
         self.receipt = receipt
 
@@ -413,6 +424,33 @@ class EvidenceFirstPipeline:
                     {
                         "kind": "witness_validation_gate",
                         "policy_version": WITNESS_VALIDATION_POLICY_VERSION,
+                        "quorum_policy_version": WITNESS_QUORUM_POLICY_VERSION,
+                        "provider_called": False,
+                    }
+                ],
+            )
+        except WitnessOutputBudgetError as exc:
+            record = stage_record(
+                stage=stage,
+                chunk_id=chunk["chunk_id"],
+                cache_key=cache_key,
+                cache_material=material,
+                pipeline_version=self.config.pipeline_version,
+                schema_version=self.config.schema_version,
+                prompt_version=self.config.prompt_version,
+                status="incomplete",
+                started_at=started,
+                output={"output_budget": exc.receipt},
+                error={
+                    "category": "witness_output_budget_exceeded",
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                model=model_identity,
+                provider_attempts=[],
+                provenance=[
+                    {
+                        "kind": "witness_output_budget",
                         "provider_called": False,
                     }
                 ],
@@ -477,7 +515,10 @@ class EvidenceFirstPipeline:
 
     @staticmethod
     def _recover_adjudication_output(
-        record: dict[str, Any], witness_a: str, witness_b: str
+        record: dict[str, Any],
+        witness_a: str,
+        witness_b: str,
+        allowed_base_witnesses: list[str] | None = None,
     ) -> tuple[
         Any,
         str | None,
@@ -497,7 +538,10 @@ class EvidenceFirstPipeline:
             return None
         try:
             output = expand_adjudication_wire(
-                parse_json_response(raw), witness_a, witness_b
+                parse_json_response(raw),
+                witness_a,
+                witness_b,
+                allowed_base_witnesses=allowed_base_witnesses,
             )
         except (json.JSONDecodeError, SchemaValidationError, ValueError, TypeError, KeyError):
             return None
@@ -522,12 +566,16 @@ class EvidenceFirstPipeline:
         prosecutor_evidence: list[dict[str, Any]],
         adjudicator_evidence: list[dict[str, Any]],
         witness_gate_record: dict[str, Any] | None = None,
+        witness_a_record: dict[str, Any] | None = None,
+        witness_b_record: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "adjudicator_key": adjudicator_record["cache_key"],
             "evidence_receipts": prosecutor_evidence + adjudicator_evidence,
             "witness_gate_key": (witness_gate_record or {}).get("cache_key"),
             "witness_gate": (witness_gate_record or {}).get("output"),
+            "witness_a_key": (witness_a_record or {}).get("cache_key"),
+            "witness_b_key": (witness_b_record or {}).get("cache_key"),
             "final_checks_version": FINAL_CHECKS_VERSION,
             "finalization_policy_version": FINALIZATION_POLICY_VERSION,
         }
@@ -665,28 +713,179 @@ class EvidenceFirstPipeline:
         prosecutor_evidence: list[dict[str, Any]],
         adjudicator_evidence: list[dict[str, Any]],
         witness_gate: dict[str, Any] | None = None,
+        witness_a: str | None = None,
+        witness_b: str | None = None,
     ) -> dict[str, Any]:
         """Apply the deterministic acceptance policy to a model proposal."""
 
         decision = json.loads(json.dumps(original_decision, ensure_ascii=False))
         normalize_adjudication_status(decision)
-        if not witness_gate or witness_gate.get("status") != "both_valid":
+        quorum = (witness_gate or {}).get("quorum") or (witness_gate or {}).get(
+            "status", "not_recorded"
+        )
+        mode = (witness_gate or {}).get("mode")
+        allowed_bases = list(
+            (witness_gate or {}).get("allowed_base_witnesses") or []
+        )
+        degraded = mode == "degraded" or quorum in {
+            "single_valid_a",
+            "single_valid_b",
+            "single_valid_witness",
+        }
+        automatic_acceptance_allowed = bool(
+            (witness_gate or {}).get(
+                "automatic_acceptance_allowed", quorum == "both_valid"
+            )
+        )
+        decision["witness_quorum"] = quorum
+        decision["automatic_acceptance_allowed"] = automatic_acceptance_allowed
+        quorum_enforcement: dict[str, Any] = {
+            "mode": mode or ("degraded" if degraded else "normal"),
+            "quorum": quorum,
+            "allowed_base_witnesses": allowed_bases,
+            "automatic_acceptance_allowed": automatic_acceptance_allowed,
+            "invalid_witness_output_is_evidence": False,
+            "rejected_base_witness": None,
+            "invalid_witness_citations": [],
+            "downgraded_decision_basis_indices": [],
+        }
+
+        if degraded:
             decision["status"] = "human_review"
-            gate_status = (witness_gate or {}).get("status", "not_recorded")
             decision.setdefault("human_review_requests", []).append(
                 {
                     "latin": "",
                     "english": "",
                     "issue": (
-                        "The adjudicated draft does not have two witnesses that "
-                        f"passed the deterministic witness boundary ({gate_status})."
+                        "The chunk has a degraded single-valid witness quorum "
+                        f"({quorum}); automatic acceptance is disabled."
                     ),
                     "action": (
-                        "Rerun or review invalid witnesses. Do not approve a draft "
-                        "whose selected base lacks a valid witness receipt."
+                        "Review the valid-base draft and all substantive findings "
+                        "before editorial acceptance."
                     ),
                 }
             )
+        elif not witness_gate or quorum != "both_valid":
+            decision["status"] = "human_review"
+            decision.setdefault("human_review_requests", []).append(
+                {
+                    "latin": "",
+                    "english": "",
+                    "issue": (
+                        "The adjudicated draft lacks a normal both-valid witness "
+                        f"quorum ({quorum})."
+                    ),
+                    "action": "Inspect the witness validation lineage before approval.",
+                }
+            )
+
+        selected_base = (decision.get("coverage") or {}).get("base_witness")
+        if degraded and selected_base not in allowed_bases:
+            fallback_base = allowed_bases[0] if len(allowed_bases) == 1 else None
+            fallback_text = (
+                witness_a
+                if fallback_base == "a"
+                else witness_b if fallback_base == "b" else None
+            )
+            quorum_enforcement["rejected_base_witness"] = selected_base
+            quorum_enforcement["fallback_base_witness"] = fallback_base
+            if isinstance(fallback_text, str):
+                decision["final_draft"] = fallback_text
+                coverage = decision.setdefault("coverage", {})
+                coverage["original_rejected_base_witness"] = selected_base
+                coverage["base_witness"] = fallback_base
+                coverage["applied_edits"] = []
+                coverage["edit_application_mode"] = "quorum_fallback_no_model_edits"
+            else:
+                # A malformed historical lineage must not leave an invalid
+                # witness as the displayed derived final.
+                decision["final_draft"] = ""
+                coverage = decision.setdefault("coverage", {})
+                coverage["original_rejected_base_witness"] = selected_base
+                coverage["base_witness"] = None
+                coverage["applied_edits"] = []
+                coverage["edit_application_mode"] = "quorum_fallback_unavailable"
+            decision["status"] = "human_review"
+            decision.setdefault("human_review_requests", []).append(
+                {
+                    "latin": "",
+                    "english": "",
+                    "issue": (
+                        f"Adjudicator selected witness {selected_base!r}, which is "
+                        f"not permitted by quorum {quorum}."
+                    ),
+                    "action": (
+                        "Discard the model edits and review the sole valid witness "
+                        f"{fallback_base!r} as the provisional base."
+                    ),
+                }
+            )
+
+        invalid_witnesses = set((witness_gate or {}).get("invalid_witnesses") or [])
+        invalid_aliases = {
+            alias
+            for name in invalid_witnesses
+            for alias in (
+                name.casefold(),
+                name.replace("_", " ").casefold(),
+                name.removeprefix("witness_").casefold(),
+            )
+        }
+
+        def cites_invalid(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            folded = value.casefold()
+            return any(
+                alias in folded
+                if alias.startswith("witness")
+                else bool(re.search(rf"\bwitness[ _-]+{re.escape(alias)}\b", folded))
+                for alias in invalid_aliases
+            )
+
+        for index, basis in enumerate(decision.get("decision_basis", [])):
+            if not isinstance(basis, dict) or not cites_invalid(basis.get("claim")):
+                continue
+            quorum_enforcement["invalid_witness_citations"].append(
+                {"location": f"decision_basis[{index}]", "witnesses": sorted(invalid_witnesses)}
+            )
+            basis["grade"] = "D"
+            basis["evidence_ids"] = []
+            quorum_enforcement["downgraded_decision_basis_indices"].append(index)
+        for field, text_field in (
+            ("findings", "reason"),
+            ("findings", "resolution"),
+            ("coverage.applied_edits", "reason"),
+        ):
+            items = (
+                (decision.get("coverage") or {}).get("applied_edits", [])
+                if field == "coverage.applied_edits"
+                else decision.get(field, [])
+            )
+            for index, item in enumerate(items):
+                if isinstance(item, dict) and cites_invalid(item.get(text_field)):
+                    quorum_enforcement["invalid_witness_citations"].append(
+                        {"location": f"{field}[{index}].{text_field}", "witnesses": sorted(invalid_witnesses)}
+                    )
+        if cites_invalid(decision.get("summary")):
+            quorum_enforcement["invalid_witness_citations"].append(
+                {"location": "summary", "witnesses": sorted(invalid_witnesses)}
+            )
+        if quorum_enforcement["invalid_witness_citations"]:
+            decision["status"] = "human_review"
+            decision.setdefault("human_review_requests", []).append(
+                {
+                    "latin": "",
+                    "english": "",
+                    "issue": "Adjudicator attempted to use an invalid witness as support.",
+                    "action": (
+                        "Ignore the invalid-witness citation and verify the claim "
+                        "from visible Latin, deterministic checks, or retrieved evidence."
+                    ),
+                }
+            )
+        decision["quorum_enforcement"] = quorum_enforcement
         pending = decision.get("evidence_requests", [])
         if pending:
             decision["research_limit_reached"] = True
@@ -801,6 +1000,15 @@ class EvidenceFirstPipeline:
             "evidence_ids": [item.get("evidence_id") for item in all_evidence],
             "final_checks": final_checks,
             "witness_validation_gate": witness_gate,
+            "witness_quorum": quorum,
+            "witness_mode": mode,
+            "permitted_base_witness_ids": allowed_bases,
+            "automatic_acceptance_allowed": automatic_acceptance_allowed,
+            "publication_eligible": (
+                decision["status"] in {"accepted", "corrected"}
+                and automatic_acceptance_allowed
+            ),
+            "quorum_enforcement": quorum_enforcement,
         }
 
     def refinalize_chunk(
@@ -843,6 +1051,8 @@ class EvidenceFirstPipeline:
             "research_prosecutor",
             "research_adjudicator",
             "adjudicator",
+            "witness_a",
+            "witness_b",
         }
         missing = sorted(
             stage
@@ -862,6 +1072,10 @@ class EvidenceFirstPipeline:
             latest["research_adjudicator"].get("output") or {}
         ).get("evidence", [])
         witness_gate_record = self._witness_gate_for_lineage(eligible, latest)
+        witness_a_record = latest["witness_a"]
+        witness_b_record = latest["witness_b"]
+        witness_a = (witness_a_record.get("output") or {}).get("translation")
+        witness_b = (witness_b_record.get("output") or {}).get("translation")
         output = lambda: (
             self._finalize_output(
                 chunk,
@@ -869,6 +1083,8 @@ class EvidenceFirstPipeline:
                 prosecutor_evidence,
                 adjudicator_evidence,
                 (witness_gate_record or {}).get("output"),
+                witness_a,
+                witness_b,
             ),
             None,
             None,
@@ -889,10 +1105,14 @@ class EvidenceFirstPipeline:
                 prosecutor_evidence,
                 adjudicator_evidence,
                 witness_gate_record,
+                witness_a_record,
+                witness_b_record,
             ),
             dependencies=[
                 adjudicator_record,
                 *([witness_gate_record] if witness_gate_record else []),
+                witness_a_record,
+                witness_b_record,
             ],
             operation=output,
             force=force,
@@ -983,6 +1203,7 @@ class EvidenceFirstPipeline:
                     for name in ("witness_a_validation", "witness_b_validation")
                 ],
                 "policy_version": WITNESS_VALIDATION_POLICY_VERSION,
+                "quorum_policy_version": WITNESS_QUORUM_POLICY_VERSION,
             },
             dependencies=[
                 records["witness_a_validation"],
@@ -1026,6 +1247,8 @@ class EvidenceFirstPipeline:
             "target_latin",
             "context_before",
             "context_after",
+            "request_context_before",
+            "request_context_after",
             "prompt_digest",
             "response_schema_digest",
         )
@@ -1150,20 +1373,26 @@ class EvidenceFirstPipeline:
                     continue
                 spec = self._model(stage)
                 prompt = witness_prompt(chunk)
-                response_schema = witness_contract_schema(chunk)
+                output_budget = estimate_witness_output_budget(
+                    chunk,
+                    prompt,
+                    max_output_tokens=spec.max_output_tokens,
+                    context_window=spec.context,
+                )
 
                 def witness_operation(
                     spec: ModelSpec = spec,
                     prompt: str = prompt,
-                    response_schema: dict[str, Any] = response_schema,
+                    output_budget: dict[str, Any] = output_budget,
                 ):
+                    if not output_budget["proceed"]:
+                        raise WitnessOutputBudgetError(output_budget)
                     response = self.provider.chat(
                         spec,
                         prompt,
-                        json_mode=True,
-                        response_schema=response_schema,
+                        json_mode=False,
                     )
-                    proposal = parse_witness_proposal(response.content)
+                    proposal = parse_plain_witness_proposal(response.content)
                     return (
                         proposal,
                         response.content,
@@ -1175,7 +1404,7 @@ class EvidenceFirstPipeline:
                 result = self._stage(
                     stage=stage,
                     chunk=chunk,
-                    inputs={"target_latin": chunk["target_latin"], "context_before": chunk.get("context_before"), "context_after": chunk.get("context_after"), "prompt_digest": self._prompt_digest(prompt), "response_schema_digest": self._prompt_digest(json.dumps(response_schema, sort_keys=True)), "blind_to": ["other_witness", "prosecutor", "adjudicator", "external_english"]},
+                    inputs={"target_latin": chunk["target_latin"], "context_before": chunk.get("context_before"), "context_after": chunk.get("context_after"), "request_context_before": "", "request_context_after": "", "context_policy": "auxiliary_latin_withheld_from_witness", "prompt_digest": self._prompt_digest(prompt), "request_prompt": prompt, "response_contract": "witness_plain_v4", "request_schema": None, "output_budget": output_budget, "blind_to": ["other_witness", "prosecutor", "adjudicator", "external_english"]},
                     dependencies=[],
                     operation=witness_operation,
                     model=spec,
@@ -1203,6 +1432,10 @@ class EvidenceFirstPipeline:
 
             witness_a = records["witness_a"]["output"]["translation"]
             witness_b = records["witness_b"]["output"]["translation"]
+            witness_gate = records["witness_gate"]["output"]
+            allowed_base_witnesses = list(
+                witness_gate.get("allowed_base_witnesses") or []
+            )
             if should_run("deterministic_checks"):
                 editorial_precedents = self.editorial_memory.match(
                     chunk["target_latin"]
@@ -1215,6 +1448,7 @@ class EvidenceFirstPipeline:
                         witness_a,
                         witness_b,
                         scripture=self.evidence.scripture,
+                        witness_gate=records["witness_gate"]["output"],
                     )
                     output["editorial_precedents"] = editorial_precedents
                     output["editorial_precedent_policy"] = {
@@ -1238,7 +1472,7 @@ class EvidenceFirstPipeline:
                 result = self._stage(
                     stage="deterministic_checks",
                     chunk=chunk,
-                    inputs={"target_latin": chunk["target_latin"], "checks_version": CHECKS_VERSION, "witness_a_key": records["witness_a"]["cache_key"], "witness_b_key": records["witness_b"]["cache_key"], "annotations": chunk.get("annotations", []), "page_markers": chunk.get("page_markers", []), "evidence_service": self.evidence.cache_identity(), "editorial_memory": editorial_memory_identity},
+                    inputs={"target_latin": chunk["target_latin"], "checks_version": CHECKS_VERSION, "witness_a_key": records["witness_a"]["cache_key"], "witness_b_key": records["witness_b"]["cache_key"], "witness_gate_key": records["witness_gate"]["cache_key"], "witness_quorum": records["witness_gate"]["output"].get("quorum"), "annotations": chunk.get("annotations", []), "page_markers": chunk.get("page_markers", []), "evidence_service": self.evidence.cache_identity(), "editorial_memory": editorial_memory_identity},
                     dependencies=[records["witness_a"], records["witness_b"], records["witness_gate"]],
                     operation=deterministic_checks_operation,
                     force=force("deterministic_checks"),
@@ -1267,11 +1501,12 @@ class EvidenceFirstPipeline:
                             )
                         ),
                     ),
+                    witness_gate=witness_gate,
                 )
                 result = self._stage(
                     stage="prosecutor_initial",
                     chunk=chunk,
-                    inputs={"prompt_digest": self._prompt_digest(prompt), "dependency_keys": [records[name]["cache_key"] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")]},
+                    inputs={"prompt_digest": self._prompt_digest(prompt), "witness_quorum": witness_gate.get("quorum"), "valid_witnesses": witness_gate.get("valid_witnesses", []), "invalid_witnesses_supplied_to_model": False if witness_gate.get("mode") == "degraded" else None, "dependency_keys": [records[name]["cache_key"] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")]},
                     dependencies=[records[name] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")],
                     operation=lambda: self._structured_call(spec, prompt, validate_prosecutor),
                     model=spec,
@@ -1399,13 +1634,14 @@ class EvidenceFirstPipeline:
                     "structural_parse",
                     "witness_a",
                     "witness_b",
+                    "witness_gate",
                     "deterministic_checks",
                     "prosecutor_grounded",
                 )
             ]
             if should_run("adjudicator_initial"):
                 spec = self._model("adjudicator")
-                response_schema = adjudication_schema()
+                response_schema = adjudication_schema(allowed_base_witnesses)
                 budgeted_prompt = budgeted_adjudicator_prompt(
                     chunk,
                     witness_a,
@@ -1417,6 +1653,7 @@ class EvidenceFirstPipeline:
                     prosecutor_evidence,
                     response_schema=response_schema,
                     budget=self.adjudicator_input_budget,
+                    witness_gate=witness_gate,
                 )
 
                 def initial_adjudicator_operation():
@@ -1427,7 +1664,10 @@ class EvidenceFirstPipeline:
                             spec,
                             budgeted_prompt.prompt,
                             lambda value: expand_adjudication_wire(
-                                value, witness_a, witness_b
+                                value,
+                                witness_a,
+                                witness_b,
+                                allowed_base_witnesses=allowed_base_witnesses,
                             ),
                             response_schema=response_schema,
                         )
@@ -1447,6 +1687,11 @@ class EvidenceFirstPipeline:
                     inputs={
                         "round": 0,
                         "adjudication_contract_version": 2,
+                        "witness_quorum": witness_gate.get("quorum"),
+                        "allowed_base_witnesses": allowed_base_witnesses,
+                        "automatic_acceptance_allowed": witness_gate.get(
+                            "automatic_acceptance_allowed"
+                        ),
                         "prompt_digest": (
                             self._prompt_digest(budgeted_prompt.prompt)
                             if budgeted_prompt.prompt is not None
@@ -1469,7 +1714,10 @@ class EvidenceFirstPipeline:
                     force=force("adjudicator_initial"),
                     retry_failed=retry_failed,
                     recover_failed=lambda record: self._recover_adjudication_output(
-                        record, witness_a, witness_b
+                        record,
+                        witness_a,
+                        witness_b,
+                        allowed_base_witnesses,
                     ),
                 )
                 records["adjudicator_initial"] = result.record
@@ -1575,7 +1823,9 @@ class EvidenceFirstPipeline:
                     final_prompt_digest = None
                 else:
                     final_spec = self._model("adjudicator")
-                    final_response_schema = adjudication_schema()
+                    final_response_schema = adjudication_schema(
+                        allowed_base_witnesses
+                    )
                     all_evidence = prosecutor_evidence + adjudicator_evidence
                     final_budgeted_prompt = budgeted_adjudicator_prompt(
                         chunk,
@@ -1588,6 +1838,7 @@ class EvidenceFirstPipeline:
                         all_evidence,
                         response_schema=final_response_schema,
                         budget=self.adjudicator_input_budget,
+                        witness_gate=witness_gate,
                     )
                     final_prompt_digest = (
                         self._prompt_digest(final_budgeted_prompt.prompt)
@@ -1608,7 +1859,10 @@ class EvidenceFirstPipeline:
                                 final_spec,
                                 final_budgeted_prompt.prompt,
                                 lambda value: expand_adjudication_wire(
-                                    value, witness_a, witness_b
+                                    value,
+                                    witness_a,
+                                    witness_b,
+                                    allowed_base_witnesses=allowed_base_witnesses,
                                 ),
                                 response_schema=final_response_schema,
                             )
@@ -1647,6 +1901,11 @@ class EvidenceFirstPipeline:
                             item.get("evidence_id")
                             for item in prosecutor_evidence + adjudicator_evidence
                         ],
+                        "witness_quorum": witness_gate.get("quorum"),
+                        "allowed_base_witnesses": allowed_base_witnesses,
+                        "automatic_acceptance_allowed": witness_gate.get(
+                            "automatic_acceptance_allowed"
+                        ),
                     },
                     dependencies=[
                         records["adjudicator_initial"],
@@ -1657,7 +1916,10 @@ class EvidenceFirstPipeline:
                     force=force("adjudicator"),
                     retry_failed=retry_failed,
                     recover_failed=lambda record: self._recover_adjudication_output(
-                        record, witness_a, witness_b
+                        record,
+                        witness_a,
+                        witness_b,
+                        allowed_base_witnesses,
                     ),
                 )
                 records["adjudicator"] = result.record
@@ -1675,6 +1937,8 @@ class EvidenceFirstPipeline:
                             prosecutor_evidence,
                             adjudicator_evidence,
                             records["witness_gate"]["output"],
+                            witness_a,
+                            witness_b,
                         ),
                         None,
                         None,
@@ -1690,8 +1954,15 @@ class EvidenceFirstPipeline:
                         prosecutor_evidence,
                         adjudicator_evidence,
                         records["witness_gate"],
+                        records["witness_a"],
+                        records["witness_b"],
                     ),
-                    dependencies=[records["adjudicator"], records["witness_gate"]],
+                    dependencies=[
+                        records["adjudicator"],
+                        records["witness_gate"],
+                        records["witness_a"],
+                        records["witness_b"],
+                    ],
                     operation=finalize_operation,
                     force=force("finalize"),
                     retry_failed=retry_failed,
@@ -1831,6 +2102,7 @@ class EvidenceFirstPipeline:
             root = None
             missing_dependencies = []
         final = latest.get("finalize", {}).get("output", {})
+        witness_quorum = latest.get("witness_gate", {}).get("output", {})
         # A locally re-finalized historical run may deliberately carry an
         # incomplete witness_gate while still exposing its immutable old draft
         # as human_review. That is a policy outcome, not a missing artifact.
@@ -1852,6 +2124,10 @@ class EvidenceFirstPipeline:
             "context_after": chunk["context_after"],
             "source_spans": chunk["source_spans"],
             "annotations": chunk["annotations"],
+            "witness_quorum": witness_quorum,
+            "automatic_acceptance_allowed": witness_quorum.get(
+                "automatic_acceptance_allowed", False
+            ),
             "stages": latest,
             "audit_lineage": {
                 "mode": "dependency_coherent" if root else "latest_diagnostic",

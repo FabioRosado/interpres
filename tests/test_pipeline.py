@@ -75,29 +75,29 @@ class FakeProvider:
             self.witness_number += 1
             # Each prompt contains source/context only. No other output leaks.
             self.assert_witness_blind(prompt)
-            translation = "He did not come." if spec.role == "witness_a" else "He has not come."
-            unit_ids = re.findall(r'<SOURCE_UNIT id="([^"]+)">', prompt)
-            content = json.dumps(
-                {
-                    "translation": translation,
-                    "source_mappings": [
-                        {
-                            "source_unit_id": unit_id,
-                            "english_end_quote": translation,
-                        }
-                        for unit_id in unit_ids
-                    ],
-                    "omissions": [],
-                    "uncertainties": [],
-                }
+            if json_mode or response_schema is not None:
+                raise AssertionError(
+                    "Production witnesses must use the plain-text v4 boundary"
+                )
+            content = (
+                "He did not come."
+                if spec.role == "witness_a"
+                else "He has not come."
             )
         elif spec.role == "prosecutor":
             content = json.dumps({"status": "no_issue_found", "summary": "No grounded issue found.", "challenges": [], "evidence_requests": []})
         elif spec.role == "adjudicator":
+            permitted_bases = (
+                response_schema.get("properties", {})
+                .get("base_witness", {})
+                .get("enum", ["a", "b"])
+                if isinstance(response_schema, dict)
+                else ["a", "b"]
+            )
             content = json.dumps(
                 {
                     "status": "accepted",
-                    "base_witness": "a",
+                    "base_witness": permitted_bases[0],
                     "edits": [],
                     "summary": "Visible evidence converges without proving correctness.",
                     "coverage": {"all_clauses_accounted_for": True, "omissions_corrected": []},
@@ -117,6 +117,60 @@ class FakeProvider:
         for forbidden in ("WITNESS A", "WITNESS B", "PROSECUTOR REPORT", "BLIND STRUCTURAL PARSE"):
             if forbidden in prompt:
                 raise AssertionError(f"Witness prompt leaked {forbidden}")
+
+
+class QuorumProvider(FakeProvider):
+    """Deterministic provider fixture for degraded/blocked quorum paths."""
+
+    def __init__(self, invalid_witnesses: set[str]):
+        super().__init__()
+        self.invalid_witnesses = invalid_witnesses
+        self.prompts: dict[str, list[str]] = {}
+
+    def chat(
+        self,
+        spec,
+        prompt: str,
+        *,
+        json_mode: bool,
+        response_schema=None,
+    ):
+        self.prompts.setdefault(spec.role, []).append(prompt)
+        if spec.role not in {"witness_a", "witness_b"}:
+            return super().chat(
+                spec,
+                prompt,
+                json_mode=json_mode,
+                response_schema=response_schema,
+            )
+        self.calls.append(spec.role)
+        self.response_schemas.append((spec.role, response_schema))
+        self.assert_witness_blind(prompt)
+        translation = (
+            "He did not come."
+            if spec.role == "witness_a"
+            else "He has not come."
+        )
+        if spec.role in self.invalid_witnesses:
+            translation = (
+                "Here is the translation of the target Latin passage: "
+                + translation
+            )
+        return ProviderResponse(
+            content=translation,
+            seconds=0.01,
+            used_model=spec.cache_identity(),
+            attempts=[
+                {
+                    "provider": "fake",
+                    "outcome": "complete",
+                    "done": True,
+                    "done_reason": "stop",
+                    "eval_count": 10,
+                }
+            ],
+            fallback_used=False,
+        )
 
 
 class EvidenceRequestingProvider(FakeProvider):
@@ -412,6 +466,30 @@ class PipelineVerticalTest(unittest.TestCase):
         )
         self.assertEqual(smoke._structural_model(large).max_output_tokens, 5200)
 
+    def test_witness_output_preflight_fails_before_provider_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = load_config()
+            data = copy.deepcopy(base.data)
+            data["paths"]["cache"] = str(Path(directory) / "cache")
+            data["models"]["witness_a"]["max_output_tokens"] = 100
+            config = PipelineConfig(path=base.path, root=base.root, data=data)
+            provider = FakeProvider()
+            pipeline = EvidenceFirstPipeline(
+                config,
+                lexicon=FakeLexicon(),
+                provider=provider,
+            )
+
+            result = pipeline.run_chunk(self.chunk(), through="witness_a")
+
+            self.assertEqual(result["failed_stage"], "witness_a")
+            self.assertNotIn("witness_a", provider.calls)
+            failure = result["records"]["witness_a"]
+            self.assertEqual(
+                failure["error"]["category"], "witness_output_budget_exceeded"
+            )
+            self.assertFalse(failure["output"]["output_budget"]["proceed"])
+
     def test_adjudicator_prompt_keeps_witnesses_and_excludes_full_morphology(self):
         prompt = adjudicator_prompt(
             self.chunk(),
@@ -452,6 +530,60 @@ class PipelineVerticalTest(unittest.TestCase):
         self.assertIn("WITNESS_B_SENTINEL", prompt)
         self.assertNotIn("FULL_MORPHOLOGY_SENTINEL", prompt)
         self.assertLess(len(prompt), 12000)
+
+    def test_degraded_prompts_withhold_invalid_witness_and_constrain_base(self):
+        gate = {
+            "quorum": "single_valid_b",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_b"],
+            "invalid_witnesses": ["witness_a"],
+            "allowed_base_witnesses": ["b"],
+            "automatic_acceptance_allowed": False,
+        }
+        checks = {
+            "summary": {},
+            "findings": [
+                {
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "evidence": {
+                        "witness": "witness_b",
+                        "matched_wrong_rendering": "lightning",
+                    },
+                },
+                {
+                    "check": "coverage_length_signal",
+                    "status": "warning",
+                    "evidence": {"witness": "witness_a"},
+                },
+            ],
+        }
+        prosecutor = prosecutor_prompt(
+            self.chunk(),
+            {"sentences": [], "intrinsic_ambiguity": [], "context_dependent": [], "unverified_analyses": []},
+            {"flags": []},
+            checks,
+            "INVALID_A_SENTINEL",
+            "VALID_B_LIGHTNING_SENTINEL",
+            witness_gate=gate,
+        )
+        adjudicator = adjudicator_prompt(
+            self.chunk(),
+            "INVALID_A_SENTINEL",
+            "VALID_B_LIGHTNING_SENTINEL",
+            {"sentences": [], "intrinsic_ambiguity": [], "context_dependent": [], "unverified_analyses": []},
+            {"flags": []},
+            checks,
+            {"challenges": [], "evidence_requests": []},
+            [],
+            witness_gate=gate,
+        )
+        for prompt in (prosecutor, adjudicator):
+            self.assertNotIn("INVALID_A_SENTINEL", prompt)
+            self.assertIn("VALID_B_LIGHTNING_SENTINEL", prompt)
+            self.assertIn("not supplied as", prompt)
+            self.assertIn("lightning", prompt)
+        self.assertIn('"base_witness": "b"', adjudicator)
 
     def test_live_prosecutor_regression_compacts_input_and_bounds_output(self):
         structural = {
@@ -945,6 +1077,20 @@ class PipelineVerticalTest(unittest.TestCase):
             self.assertEqual(audit["execution_profile"], "production")
             self.assertEqual(audit["final_draft"], "He did not come.")
             self.assertEqual(audit["stages"]["structural_parse"]["output"]["sentences"][0]["latin"], "non venit")
+            witness_inputs = audit["stages"]["witness_a"]["cache_material"][
+                "inputs"
+            ]
+            self.assertIn("<TARGET_LATIN", witness_inputs["request_prompt"])
+            self.assertIsNone(witness_inputs["request_schema"])
+            self.assertEqual(
+                witness_inputs["response_contract"], "witness_plain_v4"
+            )
+            self.assertEqual(witness_inputs["request_context_before"], "")
+            self.assertEqual(witness_inputs["request_context_after"], "")
+            self.assertNotIn(
+                "READ_ONLY_CONTEXT", witness_inputs["request_prompt"]
+            )
+            self.assertTrue(witness_inputs["output_budget"]["proceed"])
             adjudicator_schemas = [
                 schema
                 for role, schema in provider.response_schemas
@@ -966,6 +1112,10 @@ class PipelineVerticalTest(unittest.TestCase):
                     "decision_basis",
                 },
             )
+            self.assertEqual(
+                adjudicator_schemas[0]["properties"]["base_witness"]["enum"],
+                ["a", "b"],
+            )
 
             call_count = len(provider.calls)
             refinalized = pipeline.refinalize_chunk(chunk, force=True)
@@ -978,6 +1128,171 @@ class PipelineVerticalTest(unittest.TestCase):
             self.assertFalse(
                 latest_finalize["provenance"][0]["provider_called"]
             )
+
+    def test_each_single_valid_quorum_continues_but_is_sticky_human_review(self):
+        cases = (
+            ({"witness_a"}, "single_valid_b", "b"),
+            ({"witness_b"}, "single_valid_a", "a"),
+        )
+        for invalid, expected_quorum, expected_base in cases:
+            with self.subTest(quorum=expected_quorum), tempfile.TemporaryDirectory() as directory:
+                base = load_config()
+                data = copy.deepcopy(base.data)
+                data["paths"]["cache"] = str(Path(directory) / "cache")
+                data["paths"]["concordance"] = str(
+                    Path(directory) / "missing.jsonl"
+                )
+                config = PipelineConfig(path=base.path, root=base.root, data=data)
+                provider = QuorumProvider(invalid)
+                pipeline = EvidenceFirstPipeline(
+                    config, lexicon=FakeLexicon(), provider=provider
+                )
+
+                result = pipeline.run_chunk(self.chunk())
+
+                self.assertEqual(result["status"], "human_review")
+                gate = result["records"]["witness_gate"]["output"]
+                self.assertEqual(gate["quorum"], expected_quorum)
+                self.assertEqual(
+                    gate["allowed_base_witnesses"], [expected_base]
+                )
+                self.assertFalse(gate["automatic_acceptance_allowed"])
+                final = result["records"]["finalize"]["output"]
+                self.assertEqual(
+                    final["decision"]["coverage"]["base_witness"],
+                    expected_base,
+                )
+                self.assertFalse(final["automatic_acceptance_allowed"])
+                self.assertFalse(final["publication_eligible"])
+                audit = pipeline.assemble_audit(self.chunk())
+                self.assertEqual(
+                    audit["witness_quorum"]["quorum"], expected_quorum
+                )
+                self.assertFalse(audit["automatic_acceptance_allowed"])
+                self.assertEqual(audit["final_status"], "human_review")
+                gate_key = result["records"]["witness_gate"]["cache_key"]
+                for stage in (
+                    "deterministic_checks",
+                    "prosecutor_initial",
+                    "adjudicator_initial",
+                    "finalize",
+                ):
+                    dependency_keys = {
+                        dependency["cache_key"]
+                        for dependency in result["records"][stage][
+                            "cache_material"
+                        ]["dependencies"]
+                    }
+                    self.assertIn(gate_key, dependency_keys)
+                invalid_name = next(iter(invalid))
+                invalid_raw = result["records"][invalid_name]["raw_response"]
+                self.assertIn("Here is the translation", invalid_raw)
+                for role in ("prosecutor", "adjudicator"):
+                    self.assertTrue(provider.prompts.get(role))
+                    self.assertTrue(
+                        all(
+                            invalid_raw not in prompt
+                            for prompt in provider.prompts[role]
+                        )
+                    )
+
+                call_count = len(provider.calls)
+                refinalized = pipeline.refinalize_chunk(
+                    self.chunk(), force=True
+                )
+                self.assertEqual(refinalized["status"], "human_review")
+                self.assertFalse(refinalized["provider_called"])
+                self.assertEqual(len(provider.calls), call_count)
+
+    def test_both_invalid_quorum_stops_before_prosecution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = load_config()
+            data = copy.deepcopy(base.data)
+            data["paths"]["cache"] = str(Path(directory) / "cache")
+            data["paths"]["concordance"] = str(Path(directory) / "missing.jsonl")
+            config = PipelineConfig(path=base.path, root=base.root, data=data)
+            provider = QuorumProvider({"witness_a", "witness_b"})
+            result = EvidenceFirstPipeline(
+                config, lexicon=FakeLexicon(), provider=provider
+            ).run_chunk(self.chunk())
+
+            self.assertEqual(result["status"], "incomplete")
+            self.assertEqual(result["failed_stage"], "witness_gate")
+            gate = result["records"]["witness_gate"]["output"]
+            self.assertEqual(gate["quorum"], "both_invalid")
+            self.assertFalse(gate["proceed"])
+            self.assertNotIn("prosecutor", provider.calls)
+            self.assertNotIn("adjudicator", provider.calls)
+            self.assertNotIn("research_prosecutor", result["records"])
+            self.assertNotIn("research_adjudicator", result["records"])
+            self.assertIn("Here is the translation", result["records"]["witness_a"]["raw_response"])
+            self.assertIn("Here is the translation", result["records"]["witness_b"]["raw_response"])
+
+    def test_finalizer_rejects_malicious_invalid_base_and_evidence_claim(self):
+        decision = {
+            "status": "accepted",
+            "final_draft": "INVALID A DRAFT",
+            "summary": "Witness A confirms the result.",
+            "coverage": {
+                "all_clauses_accounted_for": True,
+                "omissions_corrected": [],
+                "base_witness": "a",
+                "applied_edits": [],
+            },
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [
+                {
+                    "grade": "A",
+                    "claim": "Witness A proves this reading.",
+                    "evidence_ids": ["invented"],
+                }
+            ],
+        }
+        gate = {
+            "quorum": "single_valid_b",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_b"],
+            "invalid_witnesses": ["witness_a"],
+            "allowed_base_witnesses": ["b"],
+            "automatic_acceptance_allowed": False,
+        }
+
+        output = EvidenceFirstPipeline._finalize_output(
+            self.chunk(),
+            decision,
+            [],
+            [],
+            gate,
+            "INVALID A DRAFT",
+            "He has not come.",
+        )
+
+        self.assertEqual(output["final_status"], "human_review")
+        self.assertEqual(output["final_draft"], "He has not come.")
+        self.assertEqual(output["decision"]["coverage"]["base_witness"], "b")
+        self.assertEqual(output["decision"]["decision_basis"][0]["grade"], "D")
+        self.assertEqual(output["decision"]["decision_basis"][0]["evidence_ids"], [])
+        self.assertEqual(
+            output["quorum_enforcement"]["rejected_base_witness"], "a"
+        )
+        self.assertFalse(output["publication_eligible"])
+
+        corrected_attempt = copy.deepcopy(decision)
+        corrected_attempt["status"] = "corrected"
+        corrected_output = EvidenceFirstPipeline._finalize_output(
+            self.chunk(),
+            corrected_attempt,
+            [],
+            [],
+            gate,
+            "INVALID A DRAFT",
+            "He has not come.",
+        )
+        self.assertEqual(corrected_output["final_status"], "human_review")
+        self.assertFalse(corrected_output["automatic_acceptance_allowed"])
 
     def test_audit_follows_final_dependency_chain_not_newer_orphan_stage(self):
         with tempfile.TemporaryDirectory() as directory:

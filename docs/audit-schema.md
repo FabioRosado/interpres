@@ -25,6 +25,9 @@ Each stage record includes:
 - timestamps, prompt/pipeline/schema versions;
 - configured or actually used provider/model/options;
 - provider attempts and fallback trail;
+- for new witness calls, the exact request prompt and constrained response
+  schema, their digests, the separated target/context inputs, and the
+  deterministic output-budget preflight receipt;
 - parsed output plus raw model response where configured;
 - typed error rather than an invented result;
 - source/tool provenance.
@@ -69,7 +72,8 @@ The current independently cached stage order is:
 2. `structural_parse`
 3. `witness_a`, then `witness_b` (independent prompt inputs)
 4. `witness_a_validation`, then `witness_b_validation` (provider-free)
-5. `witness_gate` (requires both proposals to be eligible)
+5. `witness_gate` (persists `both_valid`, `single_valid_a`,
+   `single_valid_b`, or blocked `both_invalid`)
 6. `deterministic_checks`
 7. `prosecutor_initial`
 8. `research_prosecutor`
@@ -81,12 +85,24 @@ The current independently cached stage order is:
 
 Witness records preserve the complete raw provider response. Validation is a
 separate derived record containing exact-input, raw-integrity, stop/token,
-schema, compact source-unit end-marker mapping, omission, preamble/fence,
-source-copy, and length
-receipts. An invalid witness is never an eligible adjudicator base. The gate
-fails closed before prosecution when fewer than two witnesses pass. Historical
-adjudications may be locally re-finalized as `human_review` with an incomplete
-gate so their immutable old draft remains inspectable but cannot be approved.
+contract, preamble/fence, source-copy, context-leakage, global length, and
+whole-target curated-name multiplicity
+receipts. An invalid witness is never an eligible adjudicator base. Exactly one
+valid witness produces a persisted degraded quorum: the invalid output remains
+visible as a non-authoritative clue, cannot corroborate or raise evidence grade,
+and automatic acceptance is false. Two invalid witnesses fail closed before
+prosecution. Historical JSON contracts retain their mapping receipts for
+audit. Current v4 plain-text records mark source-unit mappings unavailable and
+non-blocking rather than claiming model-generated coverage. Historical
+adjudications may be locally re-finalized as `human_review` when their coherent
+dependency lineage contains a degraded or incomplete gate; the immutable old
+model proposal remains inspectable but cannot be approved automatically.
+
+Downstream cache materials include the exact gate key and quorum. Adjudicator
+schemas contain only the permitted base IDs. Finalization stores the quorum,
+degraded reason, permitted bases, automatic-acceptance flag, any rejected base
+or invalid-witness citation, and `publication_eligible` independently of model
+status.
 
 Both research stages store the request list and evidence receipts separately
 from the model conclusion. A configured round count of zero is recorded as a

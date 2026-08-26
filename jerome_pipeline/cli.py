@@ -369,7 +369,10 @@ def main(argv: list[str] | None = None) -> int:
             result = pipeline.validate_cached_witnesses(chunk, force=args.force)
             results.append(result)
             _json(result)
-        return 1 if any(item.get("status") != "both_valid" for item in results) else 0
+        # A single-valid quorum is a deliberate safe degraded path, not a
+        # validation command failure. Only a blocked both-invalid quorum should
+        # produce a non-zero exit code.
+        return 1 if any(item.get("status") == "both_invalid" for item in results) else 0
     if args.command == "failed-chunks":
         _json(_failed_chunk_jobs(config, args.book, args.profile))
         return 0

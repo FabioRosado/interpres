@@ -15,7 +15,7 @@ from .editorial import EditorialRevisionStore, text_digest
 from .pipeline import STAGE_ORDER
 
 
-REVIEW_SCHEMA_VERSION = "jerome-review-v1"
+REVIEW_SCHEMA_VERSION = "jerome-review-v2"
 
 
 class ReviewArtifactError(ValueError):
@@ -190,6 +190,38 @@ def _normalise_witness(
     if uncertainties is None:
         uncertainties = output.get("uncertainty")
     validation = _dict(_dict(validation_record).get("output"))
+    ordered_check = next(
+        (
+            _dict(item)
+            for item in _list(validation.get("checks"))
+            if _dict(item).get("check") == "ordered_translation_mappings"
+        ),
+        {},
+    )
+    mapping_detail = ordered_check.get("detail")
+    spans = _list(
+        _dict(mapping_detail).get("spans")
+        if isinstance(mapping_detail, dict)
+        else mapping_detail
+    )
+    spans_by_id = {
+        item.get("source_unit_id"): item for item in spans if isinstance(item, dict)
+    }
+    source_mappings = []
+    for raw_mapping in _list(output.get("source_mappings")):
+        mapping = _dict(raw_mapping)
+        source_unit_id = mapping.get("source_unit_id") or mapping.get("source_id")
+        span = _dict(spans_by_id.get(source_unit_id))
+        source_mappings.append(
+            {
+                "source_unit_id": source_unit_id,
+                "end_marker": mapping.get("english_end_quote")
+                or mapping.get("end_marker"),
+                "translation_start": span.get("start"),
+                "translation_end": span.get("end"),
+                "validation_status": ordered_check.get("status"),
+            }
+        )
     return {
         "witness_id": label,
         "label": f"Witness {label.upper()}",
@@ -197,7 +229,7 @@ def _normalise_witness(
         "provider": model.get("provider"),
         "model": model.get("model"),
         "translation": output.get("translation") if state["available"] else None,
-        "source_mappings": _list(output.get("source_mappings")),
+        "source_mappings": source_mappings,
         "uncertainty": _list(uncertainties),
         "uncertainty_recorded": uncertainties is not None,
         "validation": validation,
@@ -205,6 +237,13 @@ def _normalise_witness(
         "eligible_as_adjudicator_base": validation.get(
             "eligible_as_adjudicator_base"
         ),
+        "authority_role": (
+            "eligible_translation_proposal"
+            if validation.get("eligible_as_adjudicator_base") is True
+            else "non_authoritative_clue_not_evidence"
+        ),
+        "may_corroborate": validation.get("eligible_as_adjudicator_base") is True,
+        "is_evidence": False,
     }
 
 
@@ -224,7 +263,10 @@ def _mapping_with_offsets(
 ) -> tuple[dict[str, Any] | None, int]:
     if not isinstance(text, str):
         return None, cursor
-    end_quote = mapping.get("english_end_quote")
+    # Witness mappings are normalised for the UI before this helper is used.
+    # Accept both the persisted contract field and the stable adapter field so
+    # legacy and compact contracts can be carried to an unchanged machine final.
+    end_quote = mapping.get("english_end_quote") or mapping.get("end_marker")
     start_quote = mapping.get("english_start_quote")
     if not isinstance(end_quote, str) or not end_quote:
         return None, cursor
@@ -241,6 +283,7 @@ def _mapping_with_offsets(
     end = end_marker + len(end_quote)
     return {
         **mapping,
+        "english_end_quote": end_quote,
         "english_start_offset": start,
         "english_end_offset": end,
         "english_start_quote": (
@@ -515,6 +558,9 @@ def build_review_view(
         if isinstance(value, dict)
     }
     history = [item for item in _list(audit.get("stage_history")) if isinstance(item, dict)]
+    quorum = _dict(_dict(records.get("witness_gate")).get("output"))
+    if not quorum:
+        quorum = _dict(audit.get("witness_quorum"))
 
     witness_a = _normalise_witness(
         "a", records.get("witness_a"), records.get("witness_a_validation")
@@ -827,6 +873,11 @@ def build_review_view(
             "pages": pages,
             "source_unit_count": len(source_units),
             "final_status": final_status,
+            "witness_quorum": quorum.get("quorum") or quorum.get("status"),
+            "witness_mode": quorum.get("mode"),
+            "automatic_acceptance_allowed": quorum.get(
+                "automatic_acceptance_allowed", False
+            ),
             "counts": counts,
             "navigation": navigation or {"previous": None, "next": None},
         },
@@ -841,6 +892,25 @@ def build_review_view(
             "annotations": _list(audit.get("annotations")),
         },
         "machine": machine,
+        "witness_quorum": {
+            "recorded": bool(quorum),
+            "quorum": quorum.get("quorum") or quorum.get("status"),
+            "mode": quorum.get("mode"),
+            "degraded_reason": quorum.get("degraded_reason"),
+            "valid_witnesses": _list(quorum.get("valid_witnesses")),
+            "invalid_witnesses": _list(quorum.get("invalid_witnesses")),
+            "permitted_base_witness_ids": _list(
+                quorum.get("permitted_base_witness_ids")
+                or quorum.get("allowed_base_witnesses")
+            ),
+            "automatic_acceptance_allowed": quorum.get(
+                "automatic_acceptance_allowed", False
+            ),
+            "invalid_witness_output_role": quorum.get(
+                "invalid_witness_output_role"
+            ),
+            "invalid_witness_output_is_evidence": False,
+        },
         "issues": {
             "items": issue_catalog,
             "count": len(issue_catalog),

@@ -87,6 +87,59 @@ class ChecksTest(unittest.TestCase):
             [{"source_form": "paulae", "expected_any": ["paula"]}],
         )
 
+    def test_electri_rejects_observed_lightning_rendering(self):
+        result = run_deterministic_checks(
+            self._chunk("electri esse in medio venti"),
+            "electrum is in the midst of the wind",
+            "lightning is in the midst of the wind",
+        )
+        traps = [
+            item
+            for item in result["findings"]
+            if item["check"] == "known_translation_trap"
+        ]
+        self.assertEqual(len(traps), 1)
+        self.assertEqual(traps[0]["severity"], "high")
+        self.assertEqual(traps[0]["evidence"]["witness"], "witness_b")
+        self.assertEqual(
+            traps[0]["evidence"]["matched_wrong_rendering"], "lightning"
+        )
+
+    def test_chunk5_degraded_quorum_preserves_valid_b_lightning_trap(self):
+        gate = {
+            "quorum": "single_valid_b",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_b"],
+            "invalid_witnesses": ["witness_a"],
+        }
+        result = run_deterministic_checks(
+            self._chunk("electri esse in medio venti"),
+            "electrum is in the midst of the wind",
+            "lightning is in the midst of the wind",
+            witness_gate=gate,
+        )
+        trap = next(
+            item
+            for item in result["findings"]
+            if item["check"] == "known_translation_trap"
+        )
+        self.assertEqual(trap["evidence"]["witness"], "witness_b")
+        self.assertEqual(
+            trap["evidence"]["witness_validation_role"],
+            "eligible_proposal",
+        )
+        self.assertTrue(trap["evidence"]["may_corroborate"])
+        invalid_a_finding = next(
+            item
+            for item in result["findings"]
+            if item.get("evidence", {}).get("witness") == "witness_a"
+        )
+        self.assertEqual(
+            invalid_a_finding["evidence"]["witness_validation_role"],
+            "invalid_witness_clue_not_evidence",
+        )
+        self.assertFalse(invalid_a_finding["evidence"]["may_corroborate"])
+
     def test_final_draft_checks_block_verified_phrase_traps(self):
         result = run_final_draft_checks(
             self._chunk(

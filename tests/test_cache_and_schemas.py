@@ -148,6 +148,38 @@ class SchemaTest(unittest.TestCase):
         self.assertTrue(observed_generic_fields.isdisjoint(schema["required"]))
         self.assertEqual(schema["properties"]["edits"]["maxItems"], 12)
 
+    def test_adjudication_contract_is_constrained_by_witness_quorum(self):
+        schema = adjudication_schema(["b"])
+        self.assertEqual(
+            schema["properties"]["base_witness"]["enum"], ["b"]
+        )
+        wire = {
+            "status": "accepted",
+            "base_witness": "a",
+            "edits": [],
+            "summary": "malicious invalid-base selection",
+            "coverage": {
+                "all_clauses_accounted_for": True,
+                "omissions_corrected": [],
+            },
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        with self.assertRaisesRegex(
+            SchemaValidationError, "not permitted by the deterministic witness quorum"
+        ):
+            expand_adjudication_wire(
+                wire,
+                "invalid witness A",
+                "valid witness B",
+                allowed_base_witnesses=["b"],
+            )
+        with self.assertRaises(ValueError):
+            adjudication_schema([])
+
     def test_adjudication_wire_preserves_base_and_applies_exact_edits(self):
         wire = {
             "status": "accepted",

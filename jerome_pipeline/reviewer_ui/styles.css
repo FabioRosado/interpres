@@ -323,6 +323,7 @@ h4 { font-size: .96rem; }
 .witness-grid, .two-column { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .analysis-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .witness-card, .record-card, .receipt-card, .stage-card, .structural-card, .morphology-card { padding: .75rem; border: 1px solid var(--line); background: var(--panel-soft); }
+.witness-card.invalid-witness { border-color: var(--danger, #a44b43); }
 .witness-text, .final-translation { font: .98rem/1.6 var(--serif); }
 .model-line, .mapping-note, .provenance-line { color: var(--muted); font-size: .65rem; }
 .record-list, #deterministic-findings, #prosecutor-initial, #prosecutor-grounded, #unresolved-list, #human-review-list, #final-checks, #evidence-list, #run-details-body { display: grid; gap: .5rem; }

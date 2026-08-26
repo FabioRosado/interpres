@@ -54,9 +54,10 @@ Separate provider-free validation records verify input identity, immutable raw
 integrity, provider completion/headroom, exact schema, absence of material
 outside the contract, expected unit IDs, ordered end-markers with the final
 marker at the translation boundary, reported omissions, suspicious source
-copying, and length signals. Two valid witnesses are required before prosecution. One or zero valid
-witnesses fails closed; raw proposals remain available for audit and human
-review but are not eligible adjudicator bases.
+copying, and length signals. The later quorum policy distinguishes two valid,
+exactly one valid, and no valid witnesses. One valid witness continues only in
+sticky degraded mode; zero valid witnesses fails closed. Raw proposals remain
+available for audit, but only valid proposals are eligible adjudicator bases.
 
 The historical free-text chunk 4/5 proposals cannot prove source-unit coverage
 under the new contract and are therefore ineligible. They were locally
@@ -80,6 +81,104 @@ reaching prosecution:
   of the translation. The new compact contract retains only one capped
   end-marker per unit, and the target is placed before all read-only context.
 
-The resulting safe cached statuses are `single_valid_witness` for chunk 4 and
-`no_valid_witnesses` for chunk 5. A new live witness-only run is required to
-test contract v2; no prosecutor or adjudicator should run until both gates pass.
+Under the former all-or-nothing gate, the resulting safe cached statuses were
+`single_valid_witness` for chunk 4 and `no_valid_witnesses` for chunk 5. This
+result prompted the witness-only v2 run
+described below; no prosecutor or adjudicator was allowed past the failed gate.
+
+Provider-free policy-v4 revalidation of chunks 1-5 records the following
+without changing any raw response: chunks 1-3 have no valid witnesses because
+their historical free-text outputs cannot prove the new structured coverage
+contract; chunk 4 has only Witness B valid; chunk 5 has no valid witnesses.
+At that point the command's nonzero exit was the intended fail-closed signal.
+
+## Second structured live run and contract v3
+
+The compact end-marker contract solved truncation but did not solve source
+containment:
+
+- Chunk 5 Witness A stopped normally at 352/1500 tokens. It translated only
+  127 English words for 389 Latin words, then supplied coverage markers for
+  material absent from its translation. The ordered-mapping and length checks
+  rejected it.
+- Witness B stopped normally at 1034/1800 tokens and emitted a full-sized
+  response, but continued into context-after through David, Abraham, Zacharias,
+  and the Apocalypse. The context-leakage check rejected it.
+
+This proves that explicit read-only delimiters are not a reliable security
+boundary for these witnesses. Contract v3 therefore withholds auxiliary Latin
+context from witness requests. The full 3-4-unit target still arrives in one
+call. The response contains one translation segment per target source unit;
+these are serialization boundaries within one continuous rendering, not
+independent calls. Deterministic software joins the segments and derives the
+coverage mappings and exact offsets. Per-unit length and copied-Latin checks
+now make the observed abbreviated/copied-marker behavior blocking.
+
+The source-level before/after context remains preserved in the chunk and audit,
+and the exact request prompt records that it was not supplied to the witness.
+Broader context remains available to the structural and later review stages.
+
+## First contract-v3 live run
+
+Both providers stopped normally and comfortably below their limits. Witness A
+used 816/1500 output tokens and Witness B used 854/1800. Both received the same
+prompt and schema digests; their configured context windows remained 8192 and
+16384 respectively, both far above the request requirement.
+
+Segment serialization exposed a finer omission in Witness A: its final segment
+contained only one rendering of two `Matthaei` occurrences and omitted the
+terminal `Jesu` quotation fragment. A policy-v6 per-source-unit curated-name
+multiplicity receipt now detects this without semantic guessing. Cached
+revalidation marks Witness A invalid and Witness B valid, leaving the gate at
+the former `single_valid_witness` state. Witness B's complete proposal still contains lexical
+questions such as `electrum` rendered as “lightning”; those are disagreements
+for prosecution/adjudication, not evidence that source coverage failed.
+
+## Matched-seed controls and contract v4
+
+Three isolated Chunk 5 controls used Qwen 3.5 9B with the same seed (`260826`),
+temperature (`0.1`), context (`8192`), output limit (`1500`), target, and
+`think=false`. None reached the output limit:
+
+| Request | Prompt tokens | Output tokens | Matthew-prologue clause | Terminal `Liber generationis Jesu` |
+|---|---:|---:|---|---|
+| production segment JSON | 1360 | 821 | omitted | present |
+| production single-string JSON | 1259 | 721 | omitted | omitted |
+| minimal plain text | 910 | 679 | present | present |
+| minimal single-string JSON | 926 | 690 | omitted | present |
+
+The minimal plain/JSON pair isolates provider-enforced structured output as a
+sufficient cause of the decisive parenthetical omission. The schema was already
+minimal and all responses stopped normally, excluding output-token exhaustion,
+context exhaustion, UI handling, cache parsing, and segment verbosity. Segment
+serialization was therefore not the root cause.
+
+Contract v4 makes the smallest safe boundary change: production witnesses now
+return one continuous plain-text translation with no provider JSON mode. The
+complete raw response is the immutable proposal; known preambles and fences are
+not stripped. The deterministic gate still checks target identity, persistence,
+provider stop/headroom, commentary, context leakage, copied Latin, length, and
+whole-target proper-name multiplicity. The latter reproduces the observed
+Chunk 5 failure because two source occurrences of `Matthaei` require two
+renderings. Source-unit mappings are explicitly unavailable and non-blocking
+rather than being fabricated or elicited through a response mode shown to harm
+coverage. Under the explicit quorum policy added afterward, this exact cached
+pair becomes `single_valid_b`: prosecution/adjudication may continue with B as
+the only base, but automatic acceptance remains disabled.
+
+## Explicit degraded quorum outcome
+
+The current gate persists `both_valid`, `single_valid_a`, `single_valid_b`, or
+`both_invalid`. Single-valid states are degraded and sticky through prompts,
+schemas, dependency keys, audit assembly, finalization, and the review API. The
+invalid raw response is retained for human forensic comparison but withheld
+from prosecutor/adjudicator model requests, cannot corroborate a claim, and
+cannot raise evidence grade. The finalizer rejects an invalid base, downgrades
+invalid-witness decision-basis citations to Grade D, and forces human review.
+
+Provider-free revalidation of the latest contract-v4 Chunk 5 cache produces
+`single_valid_b`: Qwen Witness A is invalid for the missing second Matthew
+rendering, while Mistral Witness B is structurally eligible. The independent
+deterministic `electri` trap still marks B's “lightning” rendering as a
+high-severity warning. A's “electrum” wording remains a useful clue but is not
+evidence for the correction.

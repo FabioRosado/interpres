@@ -540,23 +540,7 @@ morphology. Do not translate and make no external attributions.
 
 
 def witness_prompt(chunk: dict[str, Any]) -> str:
-    source_units_data = [
-        item for item in chunk.get("source_units", []) if isinstance(item, dict)
-    ]
-    source_units = "\n".join(
-        f'<SOURCE_UNIT id="{item["source_unit_id"]}">\n{item["text"]}\n</SOURCE_UNIT>'
-        for item in source_units_data
-        if item.get("source_unit_id") and isinstance(item.get("text"), str)
-    )
-    if not source_units:
-        fallback_ids = (chunk.get("source") or {}).get("source_unit_ids") or [
-            chunk.get("chunk_id", "target")
-        ]
-        source_units = (
-            f'<SOURCE_UNIT id="{fallback_ids[0]}">\n{chunk["target_latin"]}\n'
-            "</SOURCE_UNIT>"
-        )
-    return f"""Translate the TARGET Latin source units from St Jerome into accurate English.
+    return f"""Translate the TARGET Latin passage from St Jerome into accurate English.
 
 Priorities:
 - Preserve every clause and meaningful distinction.
@@ -568,46 +552,94 @@ Priorities:
 - Preserve names, negation, number, chronology, and textual variants carefully.
 - If genuinely uncertain, mark `[UNCERTAIN: precise explanation]`.
 - Do not reconstruct quotations or references from memory.
-- Read-only context may resolve discourse, but MUST NOT be translated as target.
-- Source-unit boundaries may split a sentence. Translate the supplied fragment
-  exactly; never complete it from the read-only context.
-- Produce one coherent full-context translation, not independent per-unit prose.
-- Return only one JSON object. `translation` is the coherent translation.
-  `source_mappings` is an audit receipt, not a second translation: include every
-  source-unit ID exactly once and in order. For each unit provide only a short
-  `english_end_quote` of 3-12 words (100 characters maximum) copied exactly from
-  the end of that unit's rendering. Do not duplicate paragraphs in mappings.
-  The final end quote must end `translation`. Report any genuinely
-  untranslated source in `omissions`; otherwise use an empty list.
+- No auxiliary Latin context is supplied. Translate all and only the target.
+- Return only the continuous English translation. Do not return JSON, headings,
+  commentary, introductions, notes, source-unit markers, or Markdown fences.
+- Preserve an incomplete opening or terminal fragment as an incomplete English
+  fragment. Do not complete a quotation or sentence from memory.
 
 <TARGET_LATIN translate="all_and_only">
-{source_units or chunk['target_latin']}
+{chunk['target_latin']}
 </TARGET_LATIN>
 
-The target above is the only text to translate. The material below appears
-after the target deliberately and is reference-only. Never copy, translate,
-complete, or continue into it.
+The target above is the complete request. Do not infer or continue text beyond
+its beginning or end, even when a quotation or sentence fragment is incomplete.
+"""
 
-<READ_ONLY_CONTEXT_BEFORE translate="false">
-{chunk.get('context_before') or '[None]'}
-</READ_ONLY_CONTEXT_BEFORE>
 
-<READ_ONLY_CONTEXT_AFTER translate="false">
-{chunk.get('context_after') or '[None]'}
-</READ_ONLY_CONTEXT_AFTER>
+def _quorum_filtered_checks(
+    checks: dict[str, Any], witness_gate: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Exclude invalid-witness findings from model evidence, not from audit."""
 
-Required JSON shape:
-{{
-  "translation": "one complete coherent English translation",
-  "source_mappings": [
-    {{
-      "source_unit_id": "exact supplied ID",
-      "english_end_quote": "short exact quote ending this unit's rendering"
-    }}
-  ],
-  "omissions": [],
-  "uncertainties": []
-}}
+    if not witness_gate or witness_gate.get("mode") != "degraded":
+        return checks
+    invalid = set(witness_gate.get("invalid_witnesses") or [])
+    copied = json.loads(json.dumps(checks, ensure_ascii=False))
+    kept = []
+    excluded = []
+    for finding in copied.get("findings", []):
+        evidence = finding.get("evidence") if isinstance(finding, dict) else None
+        witness = evidence.get("witness") if isinstance(evidence, dict) else None
+        if witness in invalid:
+            excluded.append(
+                {
+                    "finding_id": finding.get("finding_id"),
+                    "check": finding.get("check"),
+                    "witness": witness,
+                }
+            )
+        else:
+            kept.append(finding)
+    copied["findings"] = kept
+    copied["model_evidence_filter"] = {
+        "quorum": witness_gate.get("quorum"),
+        "invalid_witness_findings_excluded": excluded,
+        "invalid_witness_output_is_evidence": False,
+    }
+    return copied
+
+
+def _quorum_witness_sections(
+    witness_a: str,
+    witness_b: str,
+    witness_gate: dict[str, Any] | None,
+    *,
+    prosecutor: bool,
+) -> tuple[str, str]:
+    if not witness_gate or witness_gate.get("mode") != "degraded":
+        qualifier = " (independent)" if prosecutor else ""
+        return (
+            f"WITNESS A{qualifier}:\n<<<\n{witness_a}",
+            f"WITNESS B{qualifier}:\n<<<\n{witness_b}",
+        )
+    valid = set(witness_gate.get("valid_witnesses") or [])
+
+    def section(name: str, text: str) -> str:
+        label = name.removeprefix("witness_").upper()
+        if name in valid:
+            return f"VALID WITNESS {label} (ONLY ELIGIBLE PROPOSAL):\n<<<\n{text}"
+        return (
+            f"INVALID WITNESS {label} (AUDIT CLUE, NOT MODEL EVIDENCE):\n<<<\n"
+            "[TEXT WITHHELD FROM THIS MODEL REQUEST; preserved immutably in audit]"
+        )
+
+    return section("witness_a", witness_a), section("witness_b", witness_b)
+
+
+def _quorum_notice(witness_gate: dict[str, Any] | None) -> str:
+    if not witness_gate or witness_gate.get("mode") != "degraded":
+        return ""
+    allowed = ", ".join(witness_gate.get("allowed_base_witnesses") or [])
+    return f"""
+DETERMINISTIC DEGRADED WITNESS QUORUM:
+- Quorum: {witness_gate.get('quorum')}.
+- Only witness {allowed} is a valid translation proposal and permitted base.
+- Invalid witness text is preserved for human audit but is not supplied as
+  evidence, may not corroborate a claim, and may not raise an evidence grade.
+- Review the valid witness directly against the target Latin, structure,
+  morphology, deterministic findings, and retrieved receipts.
+- Do not generate or infer a replacement second witness.
 """
 
 
@@ -620,7 +652,12 @@ def prosecutor_prompt(
     witness_b: str,
     *,
     max_evidence_requests: int = 6,
+    witness_gate: dict[str, Any] | None = None,
 ) -> str:
+    witness_a_section, witness_b_section = _quorum_witness_sections(
+        witness_a, witness_b, witness_gate, prosecutor=True
+    )
+    visible_checks = _quorum_filtered_checks(checks, witness_gate)
     return f"""You are the adversarial prosecutor for an evidence-first English edition
 of St Jerome's Commentary on Ezekiel. Run a serious review on this chunk even
 when the witnesses agree.
@@ -641,6 +678,7 @@ matters. Inspect especially omissions/additions, subject-object reversal,
 negation, numbers, lexical sense, attachment, referents, names, Scripture,
 textual issues, excessive certainty, and contradictions with later information
 visible in the same target passage.
+{_quorum_notice(witness_gate)}
 
 Return VALID JSON ONLY:
 {{
@@ -681,13 +719,9 @@ READ-ONLY CONTEXT BEFORE / AFTER:
 ---
 {chunk.get('context_after') or '[None]'}
 
-WITNESS A (independent):
-<<<
-{witness_a}
+{witness_a_section}
 
-WITNESS B (independent):
-<<<
-{witness_b}
+{witness_b_section}
 
 BLIND STRUCTURAL PARSE (immutable original):
 <<<
@@ -699,7 +733,7 @@ COMPACT LEXICAL FLAGS (full deterministic morphology is stored separately):
 
 DETERMINISTIC CHECKS:
 <<<
-{_compact_json(checks)}
+{_compact_json(visible_checks)}
 
 SOURCE ANNOTATIONS:
 <<<
@@ -751,8 +785,17 @@ def _render_adjudicator_prompt(
     context_after: str,
     compaction_notice: str,
     dense_json: bool = False,
+    witness_gate: dict[str, Any] | None = None,
 ) -> str:
     render_json = _compact_json if dense_json else _pretty
+    witness_a_section, witness_b_section = _quorum_witness_sections(
+        witness_a, witness_b, witness_gate, prosecutor=False
+    )
+    allowed_bases = (witness_gate or {}).get("allowed_base_witnesses") or ["a", "b"]
+    base_contract = "|".join(allowed_bases)
+    permitted_base_text = ", ".join(
+        f"Witness {item.upper()}" for item in allowed_bases
+    )
     return f"""You are the final evidence-aware adjudicator for St Jerome's Commentary on
 Ezekiel. Decide from the authoritative TARGET LATIN; do not majority-vote.
 
@@ -771,6 +814,7 @@ outranks unsupported claims. Serious issues must not be resolved solely from C
 or D. Do not invent Scripture references, Jerome usage, lexicon facts,
 history, chronology, or citations. Preserve unresolved ambiguity instead of
 forcing a choice. Check target coverage clause by clause.
+{_quorum_notice(witness_gate)}
 
 Statuses:
 - accepted: a complete best draft with no substantive correction required;
@@ -781,7 +825,8 @@ Statuses:
 
 You may request targeted evidence only if it could materially change the
 decision. Requests are bounded by software. Preserve complete target coverage
-by selecting all of Witness A or all of Witness B as `base_witness`. Do not
+by selecting one complete permitted base ({permitted_base_text}) as
+`base_witness`. Do not
 rewrite or repeat the full translation. Supply only necessary exact substring
 edits against that base, in application order. Each `old` value must occur
 exactly once in the evolving base. Copy every `old` value byte-for-byte from
@@ -792,7 +837,7 @@ Software applies the edits and preserves all other base text. Return VALID
 JSON ONLY:
 {{
   "status": "accepted|corrected|unresolved|human_review",
-  "base_witness": "a|b",
+  "base_witness": "{base_contract}",
   "edits": [{{"old":"exact unique substring from selected/evolving witness", "new":"replacement text", "reason":"", "evidence_ids":[]}}],
   "summary": "precise decision summary",
   "coverage": {{"all_clauses_accounted_for": true, "omissions_corrected": []}},
@@ -816,13 +861,9 @@ READ-ONLY CONTEXT:
 ---
 {context_after or '[None]'}
 
-WITNESS A:
-<<<
-{witness_a}
+{witness_a_section}
 
-WITNESS B:
-<<<
-{witness_b}
+{witness_b_section}
 
 COMPACT ORIGINAL BLIND STRUCTURAL PARSE (full record is persisted separately):
 <<<
@@ -855,6 +896,7 @@ def adjudicator_prompt(
     checks: dict[str, Any],
     prosecutor: dict[str, Any],
     evidence: list[dict[str, Any]],
+    witness_gate: dict[str, Any] | None = None,
 ) -> str:
     """Render the historical compact prompt without applying a provider guard.
 
@@ -868,12 +910,13 @@ def adjudicator_prompt(
         witness_b,
         _compact_adjudicator_structural(structural),
         _compact_adjudicator_flags(lexical, prosecutor),
-        _compact_adjudicator_checks(checks),
+        _compact_adjudicator_checks(_quorum_filtered_checks(checks, witness_gate)),
         prosecutor,
         _compact_adjudicator_evidence(evidence),
         context_before=str(chunk.get("context_before") or ""),
         context_after=str(chunk.get("context_after") or ""),
         compaction_notice="No additional budget compaction was applied.",
+        witness_gate=witness_gate,
     )
 
 
@@ -889,14 +932,17 @@ def budgeted_adjudicator_prompt(
     *,
     response_schema: dict[str, Any],
     budget: dict[str, Any],
+    witness_gate: dict[str, Any] | None = None,
 ) -> BudgetedAdjudicatorPrompt:
     """Build an adjudicator prompt that cannot silently exceed configured limits.
 
-    Target Latin, both complete witnesses, prosecutor objections, every
-    non-pass deterministic finding, and the compact receipts referenced by a
-    high-severity objection are mandatory. Lower-priority material is reduced
-    in a fixed order. If the mandatory core does not fit, ``prompt`` is ``None``
-    and callers must fail before invoking a provider.
+    Target Latin, every quorum-eligible witness, prosecutor objections, every
+    eligible non-pass deterministic finding, and the compact receipts
+    referenced by a high-severity objection are mandatory. Invalid witness text
+    is retained in audit but withheld from degraded-mode model requests.
+    Lower-priority material is reduced in a fixed order. If the mandatory core
+    does not fit, ``prompt`` is ``None`` and callers must fail before invoking a
+    provider.
     """
 
     max_prompt_bytes = int(budget.get("max_prompt_utf8_bytes", 45_000))
@@ -914,7 +960,9 @@ def budgeted_adjudicator_prompt(
         "context_after": str(chunk.get("context_after") or ""),
         "structural": _compact_adjudicator_structural(structural),
         "flags": _compact_adjudicator_flags(lexical, prosecutor),
-        "checks": _compact_adjudicator_checks(checks),
+        "checks": _compact_adjudicator_checks(
+            _quorum_filtered_checks(checks, witness_gate)
+        ),
         "prosecutor": prosecutor,
         "evidence": _compact_budget_evidence(
             evidence, decisive_ids, summarize_lower=False
@@ -942,6 +990,7 @@ def budgeted_adjudicator_prompt(
             context_after=materials["context_after"],
             compaction_notice=notice,
             dense_json=materials["dense_json"],
+            witness_gate=witness_gate,
         )
 
     def fits(measurement: dict[str, int]) -> bool:
@@ -1040,8 +1089,25 @@ def budgeted_adjudicator_prompt(
         "serialization": "dense_json" if materials["dense_json"] else "pretty_json",
         "preserved": {
             "target_latin_chars": len(str(chunk.get("target_latin") or "")),
-            "witness_a_chars": len(witness_a),
-            "witness_b_chars": len(witness_b),
+            "witness_a_chars_supplied": (
+                len(witness_a)
+                if not witness_gate
+                or witness_gate.get("mode") != "degraded"
+                or "witness_a" in (witness_gate.get("valid_witnesses") or [])
+                else 0
+            ),
+            "witness_b_chars_supplied": (
+                len(witness_b)
+                if not witness_gate
+                or witness_gate.get("mode") != "degraded"
+                or "witness_b" in (witness_gate.get("valid_witnesses") or [])
+                else 0
+            ),
+            "invalid_witnesses_withheld": (
+                list(witness_gate.get("invalid_witnesses") or [])
+                if witness_gate and witness_gate.get("mode") == "degraded"
+                else []
+            ),
             "prosecutor_challenges": len(prosecutor.get("challenges", [])),
             "non_pass_deterministic_findings": len(
                 [

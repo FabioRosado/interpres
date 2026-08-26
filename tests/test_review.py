@@ -419,6 +419,76 @@ def fixture_audit(status: str = "corrected") -> dict:
 
 
 class ReviewViewModelTest(unittest.TestCase):
+    def test_degraded_witness_quorum_is_explicit_in_review_contract(self):
+        audit = fixture_audit("human_review")
+        gate = {
+            "quorum": "single_valid_b",
+            "status": "single_valid_b",
+            "mode": "degraded",
+            "degraded_reason": "Witness A failed deterministic validation.",
+            "valid_witnesses": ["witness_b"],
+            "invalid_witnesses": ["witness_a"],
+            "allowed_base_witnesses": ["b"],
+            "automatic_acceptance_allowed": False,
+            "invalid_witness_output_role": "non_authoritative_clue_not_evidence",
+        }
+        audit["stages"]["witness_gate"] = record("witness_gate", gate)
+        audit["stages"]["witness_a_validation"]["output"].update(
+            {"valid": False, "eligible_as_adjudicator_base": False}
+        )
+        audit["stages"]["witness_b_validation"]["output"].update(
+            {"valid": True, "eligible_as_adjudicator_base": True}
+        )
+
+        view = build_review_view(audit)
+
+        self.assertEqual(view["chunk"]["witness_quorum"], "single_valid_b")
+        self.assertEqual(view["chunk"]["witness_mode"], "degraded")
+        self.assertFalse(view["chunk"]["automatic_acceptance_allowed"])
+        self.assertEqual(
+            view["witness_quorum"]["invalid_witness_output_role"],
+            "non_authoritative_clue_not_evidence",
+        )
+        self.assertEqual(
+            view["witnesses"][0]["authority_role"],
+            "non_authoritative_clue_not_evidence",
+        )
+        self.assertFalse(view["witnesses"][0]["may_corroborate"])
+        self.assertEqual(
+            view["witnesses"][1]["authority_role"],
+            "eligible_translation_proposal",
+        )
+
+    def test_compact_witness_mapping_is_normalized_for_ui_highlighting(self):
+        audit = fixture_audit("corrected")
+        audit["stages"]["witness_a"]["output"]["source_mappings"] = [
+            {"source_unit_id": "u1", "english_end_quote": "grew cold."}
+        ]
+        audit["stages"]["witness_a_validation"]["output"]["checks"] = [
+            {
+                "check": "ordered_translation_mappings",
+                "status": "pass",
+                "detail": {
+                    "spans": [
+                        {"source_unit_id": "u1", "start": 0, "end": 14}
+                    ]
+                },
+            }
+        ]
+        view = build_review_view(audit)
+        self.assertEqual(
+            view["witnesses"][0]["source_mappings"],
+            [
+                {
+                    "source_unit_id": "u1",
+                    "end_marker": "grew cold.",
+                    "translation_start": 0,
+                    "translation_end": 14,
+                    "validation_status": "pass",
+                }
+            ],
+        )
+
     def test_successful_corrected_chunk_exposes_evidence_edits_and_coverage(self):
         view = build_review_view(fixture_audit("corrected"))
         self.assertEqual(view["chunk"]["final_status"], "corrected")
@@ -828,6 +898,14 @@ class ReviewerUISelectionTest(unittest.TestCase):
             self.app_js,
         )
         self.assertIn(".annotation.selected-source", self.css)
+
+    def test_degraded_quorum_and_invalid_clue_are_visible(self):
+        self.assertIn("Witness quorum degraded", self.app_js)
+        self.assertIn("Automatic acceptance disabled", self.app_js)
+        self.assertIn("Non-authoritative clue only", self.app_js)
+        self.assertIn("not evidence or corroboration", self.app_js)
+        self.assertIn("invalid-witness", self.app_js)
+        self.assertIn(".witness-card.invalid-witness", self.css)
 
     def test_source_selection_highlight_survives_layer_toggle_and_moves_or_clears(self):
         self.assertIn(

@@ -504,8 +504,18 @@ def validate_evidence_request(
     return value
 
 
-def adjudication_schema() -> dict[str, Any]:
+def adjudication_schema(
+    allowed_base_witnesses: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     """Provider-enforced wire contract for both adjudicator passes."""
+
+    allowed_bases = list(
+        ("a", "b")
+        if allowed_base_witnesses is None
+        else allowed_base_witnesses
+    )
+    if not allowed_bases or any(item not in {"a", "b"} for item in allowed_bases):
+        raise ValueError("allowed_base_witnesses must contain only 'a' and/or 'b'")
 
     text = {"type": "string", "maxLength": 800}
     nonempty_text = {
@@ -632,7 +642,7 @@ def adjudication_schema() -> dict[str, Any]:
     return closed(
         {
             "status": {"type": "string", "enum": sorted(FINAL_STATUSES)},
-            "base_witness": {"type": "string", "enum": ["a", "b"]},
+            "base_witness": {"type": "string", "enum": allowed_bases},
             "edits": {
                 "type": "array",
                 "items": edit,
@@ -688,13 +698,31 @@ def adjudication_schema() -> dict[str, Any]:
 
 
 def expand_adjudication_wire(
-    value: dict[str, Any], witness_a: str, witness_b: str
+    value: dict[str, Any],
+    witness_a: str,
+    witness_b: str,
+    *,
+    allowed_base_witnesses: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Apply bounded exact edits to a complete independent witness."""
 
     base_witness = value.get("base_witness")
     if base_witness not in {"a", "b"}:
         raise SchemaValidationError("adjudication.base_witness must be 'a' or 'b'")
+    allowed_bases = set(
+        ("a", "b")
+        if allowed_base_witnesses is None
+        else allowed_base_witnesses
+    )
+    if not allowed_bases or not allowed_bases.issubset({"a", "b"}):
+        raise SchemaValidationError(
+            "allowed_base_witnesses must contain only 'a' and/or 'b'"
+        )
+    if base_witness not in allowed_bases:
+        raise SchemaValidationError(
+            "adjudication.base_witness is not permitted by the deterministic "
+            f"witness quorum: {base_witness!r} not in {sorted(allowed_bases)!r}"
+        )
     edits = value.get("edits")
     if not isinstance(edits, list):
         raise SchemaValidationError("adjudication.edits must be a list")

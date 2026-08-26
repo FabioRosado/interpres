@@ -20,7 +20,10 @@ Corpus source -> canonical page units -> 3-4-unit processing chunks
   -> blind structural parse
   -> independent Witness A
   -> independent Witness B
-  -> deterministic witness validation + eligibility gate
+  -> deterministic witness validation + explicit quorum gate
+       both_valid -> normal two-witness path
+       single_valid_a|b -> degraded, sole valid base, mandatory human review
+       both_invalid -> stop before prosecution
   -> deterministic checks
   -> prosecutor_initial (every chunk)
   -> research_prosecutor (bounded deterministic evidence receipts)
@@ -32,25 +35,43 @@ Corpus source -> canonical page units -> 3-4-unit processing chunks
   -> audit JSONL with immutable stage provenance
 ```
 
-Witnesses receive target Latin as explicitly closed, ID-bearing source units
-and clearly separated read-only context. They return one coherent chunk-level
-translation plus small ordered source-unit mapping receipts; they are not
-forced to translate each unit independently. They do
+Witnesses receive only the complete target Latin inside one closed target
+element. Repeated live runs showed that both models sometimes translated Latin
+which was explicitly labelled read-only, so auxiliary context is retained in
+the audit but withheld from witness requests. Matched-seed Chunk 5 controls then
+showed that provider-enforced JSON caused a decisive parenthetical omission even
+with a minimal one-string schema, while the equivalent plain response retained
+it. Production witness contract v4 therefore preserves the complete plain-text
+response instead of requesting JSON or per-unit serialization. Witnesses do
 not receive morphology, structural output, each other, the prosecutor,
 adjudication, external English, or reviewed translations. The structural
 parser runs before witnesses and never receives English witnesses.
 
 Witness responses are untrusted proposals. Before either can reach prosecution
 or be selected as an adjudicator base, a local gate verifies the exact stored
-target, immutable raw response, provider stop/token receipt, strict JSON-only
-schema, every expected source-unit ID, ordered compact translation end-markers,
-reported omissions, commentary/fences, suspicious source copying, and
-coverage-length signals. Two valid witnesses are required to continue. One or
-zero valid witnesses fails closed before prosecution while preserving all raw
-responses for audit and human review.
+target, immutable raw response, provider stop/token receipt, versioned response
+contract identity, commentary/fences, suspicious source copying, whole-target
+curated proper-name multiplicity, and global coverage-length signals. The raw
+text is never cleaned by stripping known preambles. Source-unit mappings are
+recorded as unavailable rather than fabricated and are non-blocking under v4;
+exact input identity plus deterministic whole-target signals form the coverage
+receipt. A
+conservative context-leakage signal also compares
+the proposal with target-exclusive names and literal spans from the read-only
+context. Before a provider is contacted, a deterministic completion-budget
+preflight reserves space for translation, inline uncertainty, and a closing
+margin; an impossible request fails locally with an auditable
+receipt. The derived quorum is persisted as `both_valid`, `single_valid_a`,
+`single_valid_b`, or `both_invalid`. A single-valid chunk continues in sticky
+degraded mode: only the valid proposal is supplied as a selectable base, the
+invalid output remains an immutable non-authoritative review clue, and
+automatic acceptance is disabled. Two invalid witnesses fail closed before
+prosecution while preserving both raw responses.
 
 The cached chunk 4/5 investigation and exact provider receipts are recorded in
 [`docs/witness-boundary-diagnosis.md`](docs/witness-boundary-diagnosis.md).
+Request/response measurements and the downstream granularity assessment are in
+[`docs/witness-budget-analysis.md`](docs/witness-budget-analysis.md).
 
 Every expensive stage has an independent content-addressed JSON cache. Keys
 include source, prompt/schema/pipeline version, model/provider/options, and the
@@ -67,14 +88,16 @@ Evidence grades used in adjudication are:
 Serious issues may not be resolved solely from C/D evidence.
 
 Adjudicator requests are preflighted by a hard input-budget gate before any
-provider call. The gate preserves the complete target Latin, both complete
-witnesses, prosecutor objections, non-pass deterministic findings, and the
-receipts cited by high-severity objections. It deterministically reduces only
-lower-priority context/debug material. Every reduction is written into the
-stage cache as a budget receipt. As a final lossless step it may encode those
-same JSON sections without display whitespace; it never summarizes or drops
-mandatory evidence. If the mandatory core still does not fit, the stage fails
-with `adjudicator_input_budget_exceeded` and the provider is never called.
+provider call. In normal mode the gate preserves the complete target Latin and
+both complete valid witnesses. In degraded mode it preserves the target and
+sole valid witness while withholding the invalid witness text from the model;
+that raw output remains in audit history. Both modes preserve prosecutor
+objections, non-pass deterministic findings for eligible proposals, and the
+receipts cited by high-severity objections. The gate deterministically reduces
+only lower-priority context/debug material. Every reduction is written into the
+stage cache as a budget receipt. If the mandatory core still does not fit, the
+stage fails with `adjudicator_input_budget_exceeded` and the provider is never
+called.
 
 The adjudicator is not a trusted editor. Its structured response is an
 immutable proposal that selects one complete witness and supplies bounded
@@ -82,6 +105,9 @@ exact edits. A separately versioned deterministic finalization policy then:
 
 - reconstructs the draft from the selected witness rather than accepting
   free-form replacement text;
+- enforces the persisted quorum independently, rejects an invalid base or
+  invalid-witness evidence citation, and keeps every single-valid result in
+  `human_review` with publication eligibility disabled;
 - sends any single edit over 48 words to human review, closing the loophole
   where an exact edit could replace an entire witness paragraph;
 - blocks automatic acceptance when eight or more contiguous target-Latin
@@ -238,8 +264,10 @@ Apply the new witness gate to an existing cached pair without calling a model:
 python translate_book_v4_1.py validate-witnesses --book 1 --start 4 --end 5
 ```
 
-The command exits non-zero unless both witnesses are eligible. It never edits
-their raw responses or translations.
+The command exits `0` for `both_valid`, `single_valid_a`, or `single_valid_b`;
+the single-valid results are safe degraded states, not automatic approvals. It
+exits non-zero only for blocked `both_invalid`. It never edits or reruns either
+witness.
 
 Inspect cache/evidence/review output and export audits:
 
@@ -517,12 +545,27 @@ meaning and from corpus/Scripture/CPDV evidence.
      | Witness A         |         | Witness B               |
      | Qwen 3.5 9B       |         | Mistral Small 3.2 24B   |
      | Latin -> English  |         | Latin -> English        |
-     | independent/blind |         | independent/blind       |
+     | target-only text  |         | target-only text        |
+     | immutable raw v4  |         | immutable raw v4        |
      +-------------------+         +-------------------------+
                |                             |
                +--------------+--------------+
                               |
                               v
+                +---------------------------+
+                | Witness validation + gate |
+                | - exact target identity   |
+                | - name multiplicity       |
+                | - no Latin/context copy   |
+                | - persisted quorum state  |
+                +---------------------------+
+                   /           |            \
+        both_invalid     single_valid_*     both_valid
+             |          degraded / one base     |
+             v                |                  |
+       STOP INCOMPLETE        +---------+--------+
+                                        |
+                                        v
                 +---------------------------+
                 | Deterministic checks      |
                 | - omissions/additions     |
@@ -574,7 +617,8 @@ meaning and from corpus/Scripture/CPDV evidence.
                 | Initial adjudicator       |
                 | Qwen 3.8 27B              |
                 |                           |
-                | Selects Witness A or B    |
+                | Selects permitted valid   |
+                | Witness A and/or B base   |
                 | Returns exact edits only  |
                 | Does NOT rewrite full text|
                 +---------------------------+
@@ -604,6 +648,8 @@ meaning and from corpus/Scripture/CPDV evidence.
                  | - reconstructs full draft  |
                  | - rejects ambiguous edits  |
                  | - reruns final checks      |
+                 | - enforces quorum/base     |
+                 | - degraded => human review |
                  +----------------------------+
                                 |
                                 v

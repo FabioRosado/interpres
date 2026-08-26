@@ -191,17 +191,23 @@ normally it is unnecessary.
 Apply the deterministic witness contract and eligibility gate to the latest
 compatible cached Witness A/B prompt pair. It checks persisted
 raw-response integrity, provider stop/token receipts, structured source-unit
-coverage, ordered translation mappings, omissions, commentary/fences, and
-suspicious untranslated Latin. It never calls a model provider.
+coverage where present in historical contracts, whole-target name multiplicity,
+commentary/fences, and suspicious untranslated Latin or read-only context
+leakage. Current v4 plain-text witnesses explicitly record mappings as
+unavailable instead of asking the provider to manufacture them. It never calls a
+model provider. It derives and persists one of the explicit quorum states
+`both_valid`, `single_valid_a`, `single_valid_b`, or `both_invalid`.
 
 ```powershell
 python translate_book_v4_1.py validate-witnesses --book 1 --start 4 --end 5
 python translate_book_v4_1.py validate-witnesses --book 1 --chunk 5 --force
 ```
 
-Exit code `0` means both witnesses are eligible. A single invalid witness or
-two invalid witnesses exits with code `1` and fails closed before prosecution;
-the raw witness responses remain unchanged for audit and human review.
+Exit code `0` means the pair is safe to process: either both are valid or one is
+valid under the mandatory degraded path. A single-valid result permits only the
+valid base and disables automatic acceptance. Exit code `1` is reserved for
+blocked `both_invalid`, which stops before prosecution. All raw witness
+responses remain unchanged for audit and human review.
 
 ### `benchmark-witness`
 

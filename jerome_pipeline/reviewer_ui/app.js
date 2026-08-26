@@ -814,18 +814,19 @@ async function saveRevision(revisionState) {
 function renderWitnesses(view) {
   const grid = clear($("#witness-grid"));
   for (const witness of view.witnesses || []) {
-    const card = node("article", { className: "witness-card" }, [
+    const eligible = witness.eligible_as_adjudicator_base === true;
+    const card = node("article", { className: `witness-card${eligible ? "" : " invalid-witness"}` }, [
       node("h3", { text: witness.label }),
       node("p", { className: "model-line", text: witness.available ? `${witness.provider || "provider unrecorded"} · ${witness.model || "model unrecorded"}` : humanize(witness.state) }),
     ]);
     if (witness.validation_recorded) {
-      const eligible = witness.eligible_as_adjudicator_base === true;
       card.append(node("p", {
         className: eligible ? "save-message success" : "save-message error",
         text: eligible
           ? "Validated · eligible as adjudicator base"
           : `Not eligible as adjudicator base · ${(witness.validation.blocking_failures || []).map(humanize).join(" · ")}`,
       }));
+      if (!eligible) card.append(node("p", { className: "mapping-note", text: "Non-authoritative clue only · preserved for audit · not evidence or corroboration" }));
     } else {
       card.append(node("p", { className: "save-message error", text: "Witness validation not recorded" }));
     }
@@ -1004,6 +1005,8 @@ function renderArtifactErrors(view) {
   const witnessWarnings = (view.witnesses || []).filter((witness) => witness.validation_recorded && witness.eligible_as_adjudicator_base !== true).map((witness) => `${witness.label} invalid/incomplete`);
   const missingUnits = view.verification?.missing_source_unit_ids || [];
   const coverageWarnings = [
+    view.witness_quorum?.mode === "degraded" ? `Witness quorum degraded (${humanize(view.witness_quorum.quorum)})` : null,
+    view.witness_quorum?.recorded && view.witness_quorum?.automatic_acceptance_allowed === false ? "Automatic acceptance disabled" : null,
     view.verification?.coverage_assertion === false ? "Final coverage not complete" : null,
     missingUnits.length ? `${missingUnits.length} source unit${missingUnits.length === 1 ? "" : "s"} missing final coverage` : null,
     view.final?.mapping_available ? null : "Final source mappings not persisted",

@@ -8,7 +8,7 @@ from typing import Any, Protocol
 WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
 ARABIC_RE = re.compile(r"(?<!\w)\d+(?!\w)")
 ROMAN_RE = re.compile(r"(?<![A-Za-z])[IVXLCDM]{2,}(?![A-Za-z])")
-CHECKS_VERSION = 6
+CHECKS_VERSION = 8
 FINAL_CHECKS_VERSION = 3
 MAX_AUTOMATIC_EDIT_WORDS = 48
 MAX_SOURCE_COPY_WORDS = 7
@@ -65,8 +65,27 @@ ENGLISH_CARDINAL_VALUES = {
 }
 CURATED_PROPER_NAME_EQUIVALENTS = {
     "paulae": {"paula"},
+    "jesu": {"jesus"},
+    "christi": {"christ"},
+    "paulus": {"paul"},
+    "pauli": {"paul"},
+    "matthaei": {"matthew"},
+    "marcum": {"mark"},
+    "lucae": {"luke"},
+    "joannis": {"john"},
+    "isaia": {"isaiah"},
+    "zachariae": {"zacharias", "zachariah"},
+    "aquila": {"aquila"},
 }
 CURATED_TRANSLATION_TRAPS = (
+    {
+        "source_phrase": "electri",
+        "wrong_renderings": ("lightning", "electrified"),
+        "expected": (
+            "Preserve the ancient material term as electrum unless evidence "
+            "supports a more precise alloy or amber rendering."
+        ),
+    },
     {
         "source_phrase": "concaluit cor meum",
         "wrong_renderings": ("grew cold",),
@@ -348,9 +367,22 @@ def run_deterministic_checks(
     witness_b: str,
     *,
     scripture: ScriptureVerifier | None = None,
+    witness_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     findings = _translation_checks(chunk["target_latin"], witness_a, "witness_a")
     findings.extend(_translation_checks(chunk["target_latin"], witness_b, "witness_b"))
+    valid_witnesses = set((witness_gate or {}).get("valid_witnesses") or [])
+    quorum_recorded = bool(witness_gate)
+    for finding in findings:
+        evidence = finding.get("evidence")
+        witness = evidence.get("witness") if isinstance(evidence, dict) else None
+        if witness not in {"witness_a", "witness_b"}:
+            continue
+        eligible = not quorum_recorded or witness in valid_witnesses
+        evidence["witness_validation_role"] = (
+            "eligible_proposal" if eligible else "invalid_witness_clue_not_evidence"
+        )
+        evidence["may_corroborate"] = eligible
 
     target_spans = [span for span in chunk.get("source_spans", []) if span.get("role") == "target"]
     span_pages = list(
@@ -418,6 +450,13 @@ def run_deterministic_checks(
             "unavailable": sum(1 for item in findings if item["status"] == "unavailable"),
         },
         "findings": findings,
+        "witness_quorum": {
+            "quorum": (witness_gate or {}).get("quorum"),
+            "mode": (witness_gate or {}).get("mode"),
+            "valid_witnesses": sorted(valid_witnesses),
+            "invalid_witnesses": (witness_gate or {}).get("invalid_witnesses", []),
+            "invalid_witness_output_is_evidence": False,
+        },
         "limits": "These checks surface cheap signals; they do not prove semantic correctness.",
     }
 
