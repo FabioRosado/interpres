@@ -1,0 +1,19 @@
+{
+  "sentences": [
+    {
+      "id": 1,
+      "verbs": [
+        {
+          "form": "aggrediar",
+          "lemma": "aggredior",
+          "mood": "subjunctive",
+          "tense": "present",
+          "voice": "deponent"
+        }
+      ],
+      "subject": {"text": "ego (implied)", "uncertain": false},
+      "objects": [],
+      "clauses": [],
+      "attachments": [],
+      "referents": [],
+      "idioms": [],

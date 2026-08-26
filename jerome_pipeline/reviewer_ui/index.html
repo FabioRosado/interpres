@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Editorial workspace for the St Jerome translation pipeline" />
+    <title>Jerome Editor · Editorial Desk</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#review-main">Skip to editor</a>
+    <div class="app-shell">
+      <header class="masthead">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">H</div>
+          <div><p class="eyebrow">Commentaria in Ezechielem</p><h1>Editorial desk</h1></div>
+        </div>
+        <div class="masthead-actions">
+          <span class="safety-pill">Machine record locked</span>
+          <button class="quiet-button dark" id="refresh-button" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <aside class="sidebar" aria-label="Chunk navigation">
+        <div class="sidebar-heading"><div><p class="eyebrow">Book I</p><h2>Chunks</h2></div><span class="chunk-total" id="chunk-total">—</span></div>
+        <div class="sidebar-search"><label for="chunk-search">Find a chunk</label><input id="chunk-search" type="search" placeholder="ID, page, status…" /></div>
+        <nav class="chunk-list" id="chunk-list" aria-label="Available chunks"></nav>
+      </aside>
+
+      <main class="review-main" id="review-main" tabindex="-1">
+        <div class="loading-panel" id="loading-panel"><p class="eyebrow">Reading machine and editorial records</p><h2>Preparing the workspace…</h2></div>
+
+        <div id="review-content" hidden>
+          <section class="chunk-toolbar" aria-labelledby="chunk-title">
+            <div class="chunk-heading"><p class="eyebrow" id="chunk-kicker">Book I · PL —</p><h2 id="chunk-title">Chunk</h2><p class="chunk-id" id="chunk-id"></p></div>
+            <div class="toolbar-status">
+              <span class="status-badge" id="final-status">Incomplete</span>
+              <span class="revision-badge" id="revision-badge">No editorial revision</span>
+              <div class="nav-pair"><button class="quiet-button" id="previous-chunk" type="button">← Previous</button><button class="quiet-button" id="next-chunk" type="button">Next →</button></div>
+            </div>
+          </section>
+
+          <div class="artifact-alert" id="artifact-alert" hidden></div>
+          <section class="metric-strip" id="metric-strip" aria-label="Chunk summary"></section>
+          <section class="review-controls" aria-label="Review highlight controls">
+            <div>
+              <p class="eyebrow">Review mode</p>
+              <div class="mode-switch" role="group" aria-label="Reading mode">
+                <button class="mini-filter active" id="mode-review" type="button">Review</button>
+                <button class="mini-filter" id="mode-clean" type="button">Clean reading</button>
+              </div>
+            </div>
+            <div class="layer-controls" id="layer-controls" aria-label="Annotation layers"></div>
+            <div class="review-actions">
+              <button class="quiet-button" id="show-all-layers" type="button">Show all</button>
+              <button class="quiet-button" id="hide-all-layers" type="button">Hide all</button>
+              <button class="quiet-button" id="clear-selection" type="button">Clear selection</button>
+            </div>
+          </section>
+
+          <section class="editor-section" id="edit-workspace" aria-label="Translation editor">
+            <div class="editor-workspace">
+              <aside class="source-pane pane" aria-labelledby="source-heading">
+                <div class="pane-heading"><div><p class="eyebrow">Authoritative source</p><h3 id="source-heading">Latin</h3></div><button class="text-button" id="clear-unit" type="button" hidden>Clear focus</button></div>
+                <div class="unit-tabs" id="source-unit-tabs" aria-label="Source units"></div>
+                <div class="latin-units" id="latin-units"></div>
+                <details class="context-drawer"><summary>Adjacent context and annotations</summary><div id="context-grid"></div></details>
+              </aside>
+
+              <section class="writing-pane pane" aria-labelledby="editor-heading">
+                <div class="pane-heading"><div><p class="eyebrow">Human editorial copy</p><h3 id="editor-heading">Working translation</h3></div><span class="save-state" id="save-state">Saved</span></div>
+                <div class="machine-reference">
+                  <div class="machine-reference-heading"><span>Machine final · locked</span><button class="text-button" id="toggle-machine" type="button" aria-expanded="true">Collapse</button></div>
+                  <p id="machine-final"></p>
+                </div>
+                <label class="editor-label" for="editor-translation">Editorial translation</label>
+                <textarea id="editor-translation" spellcheck="true" aria-describedby="editor-help"></textarea>
+                <div class="editorial-preview-shell" id="editorial-preview-shell">
+                  <span>Editorial issue map</span>
+                  <div class="editorial-preview annotated-text" id="editorial-preview"></div>
+                </div>
+                <p class="editor-help" id="editor-help">Saving creates a new file. It never changes the machine output or an earlier editorial revision.</p>
+                <div class="editor-actions"><button class="primary-button secondary" id="save-draft" type="button">Save new draft revision</button><button class="primary-button" id="approve-revision" type="button">Approve new revision</button></div>
+                <div class="save-message" id="save-message" role="status" aria-live="polite"></div>
+                <details class="revision-history"><summary id="revision-history-summary">Revision history</summary><div id="revision-history"></div></details>
+              </section>
+
+              <aside class="issue-pane pane" aria-labelledby="issue-heading">
+                <div class="pane-heading issue-heading-row"><div><p class="eyebrow">Resolution ledger</p><h3 id="issue-heading">Issues</h3></div><span class="issue-total" id="issue-total">0</span></div>
+                <div class="issue-filters" id="issue-filters"><button class="mini-filter active" type="button" data-issue-filter="open">Open</button><button class="mini-filter" type="button" data-issue-filter="resolved">Resolved</button><button class="mini-filter" type="button" data-issue-filter="all">All</button></div>
+                <div class="issue-navigation"><button class="quiet-button" id="previous-issue" type="button">Previous issue</button><button class="quiet-button" id="next-issue" type="button">Next issue</button></div>
+                <div class="selected-context" id="selected-context" hidden></div>
+                <div class="resolution-list" id="resolution-list"></div>
+                <div class="precedent-note"><b>Editorial precedent is opt-in.</b><p>Only an approved revision with “reuse” enabled is shown to later review stages. Witnesses remain blind, and precedent is never treated as source evidence.</p></div>
+              </aside>
+            </div>
+          </section>
+
+          <div class="decision-trail-heading">
+            <div><p class="eyebrow">Complete immutable audit</p><h2>Decision trail</h2><p>Everything the models, deterministic gates, and evidence service recorded for this chunk.</p></div>
+            <span>Machine record · read-only</span>
+          </div>
+          <nav class="decision-jumps" aria-label="Decision trail sections">
+            <a href="#decision-witnesses">Witnesses</a>
+            <a href="#decision-challenges">Challenges</a>
+            <a href="#decision-adjudicator">Adjudicator</a>
+            <a href="#decision-final">Final &amp; diff</a>
+            <a href="#decision-verification">Verification</a>
+            <a href="#decision-evidence">Evidence</a>
+            <a href="#decision-structural">Structural</a>
+            <a href="#decision-morphology">Morphology</a>
+            <a href="#decision-provenance">Provenance</a>
+          </nav>
+
+          <section class="audit-section" id="decision-witnesses" aria-label="Witness comparison">
+            <div class="section-card">
+              <div class="section-heading"><div><p class="eyebrow">Stage 1 · independent drafts</p><h3>Witness comparison</h3></div><p id="disagreement-note"></p></div>
+              <div class="witness-grid" id="witness-grid"></div>
+              <div class="subsection-heading"><h4>Recorded disagreements</h4></div>
+              <div class="record-list" id="disagreement-list"></div>
+            </div>
+          </section>
+
+          <section class="audit-section" id="decision-challenges" aria-label="Checks and prosecutor challenges">
+            <div class="section-card">
+              <div class="section-heading"><div><p class="eyebrow">Stages 2–4 · challenge pipeline</p><h3>Checks and objections</h3></div><span class="evidence-key">Deterministic evidence ≠ model inference</span></div>
+              <div class="analysis-grid">
+                <div><h4>Deterministic findings</h4><p class="stage-summary" id="deterministic-summary"></p><div id="deterministic-findings"></div></div>
+                <div><h4>Prosecutor · initial</h4><p class="stage-summary" id="prosecutor-initial-summary"></p><div id="prosecutor-initial"></div><details class="request-details"><summary>Initial evidence requests</summary><pre id="prosecutor-initial-requests"></pre></details></div>
+                <div><h4>Prosecutor · grounded</h4><p class="stage-summary" id="prosecutor-grounded-summary"></p><div id="prosecutor-grounded"></div><details class="request-details"><summary>Remaining evidence requests</summary><pre id="prosecutor-grounded-requests"></pre></details><p class="mapping-note" id="prosecutor-transition-note"></p></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="audit-section" id="decision-adjudicator" aria-label="Adjudicator decision">
+            <div class="section-card">
+              <div class="section-heading"><div><p class="eyebrow">Stage 5 · decision layer</p><h3>Adjudicator decision and exact edits</h3></div><span class="base-witness" id="base-witness"></span></div>
+              <p class="decision-summary" id="adjudicator-summary"></p>
+              <div class="decision-columns">
+                <div><h4>Decision basis</h4><div class="record-list" id="decision-basis"></div></div>
+                <div><h4>Adjudicator findings</h4><div class="record-list" id="adjudicator-findings"></div></div>
+              </div>
+              <div class="decision-raw-grid">
+                <details><summary>Coverage record</summary><pre id="adjudicator-coverage"></pre></details>
+                <details><summary>Adjudicator evidence requests</summary><pre id="adjudicator-evidence-requests"></pre></details>
+              </div>
+              <div class="subsection-heading"><h4>Applied exact edits</h4></div>
+              <div class="record-list" id="edit-list"></div>
+              <div class="two-column decision-followups"><div><h4>Unresolved issues</h4><div id="unresolved-list"></div></div><div><h4>Human-review requests</h4><div id="human-review-list"></div></div></div>
+            </div>
+          </section>
+
+          <section class="audit-section" id="decision-final" aria-label="Machine final and diff">
+            <div class="section-card">
+              <div class="section-heading"><div><p class="eyebrow">Stage 6 · deterministic reconstruction</p><h3>Machine final and exact diff</h3></div><span class="section-note" id="final-method"></span></div>
+              <div class="final-translation" id="final-translation"></div>
+              <div class="subsection-heading"><h4>Base-to-final diff</h4></div>
+              <div class="translation-diff" id="translation-diff"></div>
+              <details class="source-mapping-details"><summary>Final source mappings</summary><div id="source-mappings"></div></details>
+            </div>
+          </section>
+
+          <section class="audit-section" id="decision-verification" aria-label="Verification and coverage">
+            <div class="section-card"><div class="section-heading"><div><p class="eyebrow">Stage 7 · post-adjudication gate</p><h3>Verification and coverage</h3></div></div><div class="verification-grid" id="verification-grid"></div><div id="final-checks"></div></div>
+          </section>
+
+          <section class="audit-section" id="decision-evidence" aria-label="Evidence receipts">
+            <div class="section-card"><div class="section-heading"><div><p class="eyebrow">Bounded research rounds</p><h3>Research evidence</h3></div></div><div id="evidence-list"></div></div>
+          </section>
+
+          <details class="audit-section section-card analysis-disclosure" id="decision-structural">
+            <summary><span><b>Blind structural analysis</b><small>Original syntax, ambiguity, alternatives, and uncertainty</small></span><span id="structural-state"></span></summary>
+            <div class="details-body" id="structural-body"></div>
+          </details>
+
+          <details class="audit-section section-card analysis-disclosure" id="decision-morphology">
+            <summary><span><b>Morphology and lexical flags</b><small>Deterministic candidates kept separate from model claims</small></span><span id="morphology-state"></span></summary>
+            <div class="details-body" id="morphology-body"></div>
+          </details>
+
+          <section class="audit-section" id="decision-provenance" aria-label="Run provenance">
+            <div class="section-card provenance-warning">This is the immutable machine record. Editorial saves are stored separately and never rewrite anything below.</div>
+            <div id="run-details-body"></div>
+          </section>
+        </div>
+
+        <div class="error-panel" id="error-panel" hidden><p class="eyebrow">Workspace unavailable</p><h2>These records could not be displayed safely.</h2><p id="error-message"></p><button class="quiet-button" id="retry-button" type="button">Try again</button></div>
+      </main>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

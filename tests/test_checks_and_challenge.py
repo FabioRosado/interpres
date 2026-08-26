@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import unittest
+
+from jerome_pipeline.challenge import apply_mutation
+from jerome_pipeline.checks import run_deterministic_checks, run_final_draft_checks
+
+
+class ChecksTest(unittest.TestCase):
+    def _chunk(self, latin: str):
+        return {
+            "target_latin": latin,
+            "source_spans": [{"role": "target", "page": "1A"}],
+            "page_markers": [{"page": "1A"}],
+            "source": {"pages": ["1A"]},
+            "annotations": [],
+        }
+
+    def test_negation_and_number_signals(self):
+        result = run_deterministic_checks(
+            self._chunk("non venit cum tribusque pueris"),
+            "he came with four boys",
+            "he did not come with three boys",
+        )
+        warnings = {(item["check"], item["evidence"].get("witness")) for item in result["findings"] if item["status"] == "warning"}
+        self.assertIn(("negation", "witness_a"), warnings)
+        self.assertIn(("number_words", "witness_a"), warnings)
+        self.assertNotIn(("negation", "witness_b"), warnings)
+
+    def test_page_integrity_failure(self):
+        chunk = self._chunk("venit")
+        chunk["page_markers"] = [{"page": "2A"}]
+        result = run_deterministic_checks(chunk, "he came", "he came")
+        page = next(item for item in result["findings"] if item["check"] == "page_marker_integrity")
+        self.assertEqual(page["status"], "failure")
+
+    def test_roman_numeral_date_accepts_roman_or_arabic_equivalent(self):
+        result = run_deterministic_checks(
+            self._chunk("anno XXXVIII venit"),
+            "he came in that year",
+            "he came in the year 38",
+        )
+        roman = [
+            item
+            for item in result["findings"]
+            if item["check"] == "roman_numerals"
+        ]
+        self.assertEqual(roman[0]["status"], "warning")
+        self.assertEqual(roman[0]["evidence"]["missing"][0]["arabic"], 38)
+        self.assertEqual(roman[1]["status"], "pass")
+
+    def test_additive_latin_number_accepts_english_total(self):
+        result = run_deterministic_checks(
+            self._chunk("decem et octo volumina"),
+            "eighteen volumes",
+            "18 volumes",
+        )
+        number_words = [
+            item
+            for item in result["findings"]
+            if item["check"] == "number_words"
+        ]
+        self.assertEqual([item["status"] for item in number_words], ["pass", "pass"])
+        self.assertEqual(
+            number_words[0]["evidence"]["composite_equivalents"],
+            [{"latin": "decem et octo", "value": 18}],
+        )
+
+    def test_curated_inflected_name_rejects_paul_for_paulae(self):
+        result = run_deterministic_checks(
+            self._chunk("matri tuae Paulae"),
+            "to your mother Paul",
+            "to your mother Paula",
+        )
+        curated = [
+            item
+            for item in result["findings"]
+            if item["check"] == "proper_names"
+            and item["evidence"].get("curated_mismatches")
+        ]
+        self.assertEqual(len(curated), 1)
+        self.assertEqual(curated[0]["status"], "warning")
+        self.assertEqual(curated[0]["severity"], "high")
+        self.assertEqual(curated[0]["evidence"]["witness"], "witness_a")
+        self.assertEqual(
+            curated[0]["evidence"]["curated_mismatches"],
+            [{"source_form": "paulae", "expected_any": ["paula"]}],
+        )
+
+    def test_final_draft_checks_block_verified_phrase_traps(self):
+        result = run_final_draft_checks(
+            self._chunk(
+                "concaluit cor meum; silui a bonis; quatuor plagas mundi"
+            ),
+            (
+                "my heart grew cold; I was silent among the good; "
+                "the four corners of the world"
+            ),
+        )
+        traps = [
+            item
+            for item in result["findings"]
+            if item["check"] == "known_translation_trap"
+        ]
+        self.assertEqual(len(traps), 3)
+        self.assertTrue(all(item["severity"] == "high" for item in traps))
+
+    def test_final_draft_blocks_observed_chunk5_latin_copy(self):
+        copied = (
+            "electri esse in medio venti vel spiritus Ergo hoc sentiendum quod "
+            "in medio ignis et tormentorum Dei electri similitudo sit quod est "
+            "auro argentoque pretiosius ut post judicium atque tormenta quae "
+            "patientibus tristia videntur et dura pretiosior electri fulgor "
+            "appareat dum providentia Dei omnia gubernantur et quae putatur "
+            "poena medicina est"
+        )
+        result = run_final_draft_checks(
+            self._chunk(copied),
+            copied + ". And the four living creatures appeared.",
+        )
+        finding = next(
+            item
+            for item in result["findings"]
+            if item["check"] == "source_latin_copy"
+        )
+        self.assertEqual(finding["status"], "warning")
+        self.assertEqual(finding["severity"], "high")
+        self.assertGreaterEqual(finding["evidence"]["copied_word_count"], 50)
+
+    def test_large_adjudicator_rewrite_requires_human_review_gate(self):
+        old = " ".join(f"english{index}" for index in range(73))
+        new = " ".join(f"replacement{index}" for index in range(51))
+        result = run_final_draft_checks(
+            self._chunk("latin source"),
+            new,
+            applied_edits=[{"old": old, "new": new, "reason": "rewrite"}],
+        )
+        finding = next(
+            item
+            for item in result["findings"]
+            if item["check"] == "adjudicator_edit_scope"
+        )
+        self.assertEqual(finding["status"], "warning")
+        self.assertEqual(finding["severity"], "high")
+        self.assertEqual(
+            finding["evidence"]["oversized_edits"][0]["old_word_count"], 73
+        )
+
+
+class ChallengeMutationTest(unittest.TestCase):
+    def test_supported_mutations(self):
+        self.assertNotIn("not", apply_mutation("he did not come", "remove_negation"))
+        self.assertIn("four", apply_mutation("the three boys", "alter_number"))
+        self.assertTrue(apply_mutation("He came.", "unsupported_certainty").startswith("Certainly"))
+        swapped = apply_mutation("John saw Mary", "swap_subject_object", {"subject": "John", "object": "Mary"})
+        self.assertEqual(swapped, "Mary saw John")
+        self.assertIn("Psalm 23", apply_mutation("He came.", "invent_scripture_allusion"))
+
+
+if __name__ == "__main__":
+    unittest.main()
