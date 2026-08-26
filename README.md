@@ -87,6 +87,17 @@ Evidence grades used in adjudication are:
 
 Serious issues may not be resolved solely from C/D evidence.
 
+The initial prosecutor also has a hard provider-side preflight. Its mandatory
+core is the complete target, every quorum-permitted witness, high-severity
+checks, related lexical traps, and relevant structure expressed as target
+offsets rather than duplicated Latin. Lower-priority findings, morphology,
+structure, annotations, and context enter only in bounded priority tiers. The
+16,000-token/44,000-byte input ceiling leaves over 12,500 context tokens after
+the 4,200-token output allowance. A mandatory-core overflow fails as
+`prosecutor_input_budget_exceeded` without a provider call. Successful stage
+inputs retain the exact bounded request prompt, its digest, and the detailed
+inclusion/filtering receipt, so the model-facing view is directly auditable.
+
 Adjudicator requests are preflighted by a hard input-budget gate before any
 provider call. In normal mode the gate preserves the complete target Latin and
 both complete valid witnesses. In degraded mode it preserves the target and
@@ -110,13 +121,16 @@ exact edits. A separately versioned deterministic finalization policy then:
   `human_review` with publication eligibility disabled;
 - sends any single edit over 48 words to human review, closing the loophole
   where an exact edit could replace an entire witness paragraph;
+- also sends more than 96 cumulative edited words or more than 25% replacement
+  of the selected base witness to human review;
 - blocks automatic acceptance when eight or more contiguous target-Latin
   words remain in the purported English draft;
 - verifies positive evidence citations against persisted receipts, so
   `no_evidence_found`, `unavailable`, errors, unknown IDs, and unverified
   research leads cannot support Grade-A/B claims;
-- requires each high-severity finding to have a source-verifiable Grade-A
-  basis or its own successful receipt;
+- requires each high-severity finding to have its own matching deterministic
+  support or a successful claim-relevant receipt; an unrelated Grade A/B claim
+  cannot globally bless other findings;
 - normalizes decisions carrying unresolved or human-review items away from
   `accepted`/`corrected`.
 

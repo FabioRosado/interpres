@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from jerome_pipeline.cache import StageCache
+from jerome_pipeline.cache import StageCache, canonical_digest
 from jerome_pipeline.config import PipelineConfig, load_config
 from jerome_pipeline.pipeline import STAGE_ORDER
 from jerome_pipeline.review import ReviewRepository, build_review_view
@@ -755,6 +755,81 @@ class ReviewRepositoryTest(unittest.TestCase):
                 "A stale translation for different Latin.",
             )
             self.assertEqual(view["chunk"]["final_status"], "corrected")
+
+    def test_repository_uses_newest_coherent_witness_branch_not_old_final(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            chunk = {
+                "chunk_id": "book01-fixture",
+                "book": 1,
+                "source": {},
+                "source_units": [],
+                "page_markers": [],
+                "target_latin": "electri esse in medio",
+                "context_before": "",
+                "context_after": "",
+                "source_spans": [],
+                "annotations": [],
+                "source_fingerprint": "fixture-source",
+            }
+
+            def linked(stage, key, output, finished, dependencies=()):
+                value = record(stage, output)
+                value["cache_key"] = key
+                value["finished_at"] = finished
+                value["cache_material"]["dependencies"] = [
+                    {
+                        "stage": item["stage"],
+                        "cache_key": item["cache_key"],
+                        "output_digest": canonical_digest(item.get("output")),
+                    }
+                    for item in dependencies
+                ]
+                return value
+
+            old_a = linked("witness_a", "old-a", {"translation": "Old A"}, "2026-01-01T01:00:00Z")
+            old_b = linked("witness_b", "old-b", {"translation": "Old B"}, "2026-01-01T01:00:01Z")
+            old_av = linked("witness_a_validation", "old-av", {"valid": True}, "2026-01-01T01:00:02Z", [old_a])
+            old_bv = linked("witness_b_validation", "old-bv", {"valid": True}, "2026-01-01T01:00:02Z", [old_b])
+            old_gate = linked("witness_gate", "old-gate", {"quorum": "both_valid", "mode": "normal"}, "2026-01-01T01:00:03Z", [old_av, old_bv])
+            old_checks = linked("deterministic_checks", "old-checks", {"findings": []}, "2026-01-01T01:00:04Z", [old_gate])
+            old_prosecutor = linked("prosecutor_initial", "old-prosecutor", {"summary": "old"}, "2026-01-01T01:00:05Z", [old_checks])
+            old_adjudicator = linked("adjudicator", "old-adjudicator", {"final_draft": "Old machine final"}, "2026-01-01T01:00:06Z", [old_prosecutor])
+            old_final = linked("finalize", "old-final", {"final_draft": "Old machine final", "final_status": "accepted"}, "2026-01-01T01:00:07Z", [old_adjudicator, old_gate])
+
+            new_a = linked("witness_a", "new-a", {"translation": "Invalid new A"}, "2026-01-02T01:00:00Z")
+            new_b = linked("witness_b", "new-b", {"translation": "Valid new B"}, "2026-01-02T01:00:01Z")
+            new_av = linked("witness_a_validation", "new-av", {"valid": False}, "2026-01-02T01:00:02Z", [new_a])
+            new_bv = linked("witness_b_validation", "new-bv", {"valid": True}, "2026-01-02T01:00:02Z", [new_b])
+            new_gate = linked(
+                "witness_gate",
+                "new-gate",
+                {
+                    "quorum": "single_valid_b",
+                    "mode": "degraded",
+                    "valid_witnesses": ["witness_b"],
+                    "invalid_witnesses": ["witness_a"],
+                    "allowed_base_witnesses": ["b"],
+                    "automatic_acceptance_allowed": False,
+                },
+                "2026-01-02T01:00:03Z",
+                [new_av, new_bv],
+            )
+            records = [
+                old_a, old_b, old_av, old_bv, old_gate, old_checks,
+                old_prosecutor, old_adjudicator, old_final,
+                new_a, new_b, new_av, new_bv, new_gate,
+            ]
+            audit = ReviewRepository(config)._audit(chunk, records)
+            self.assertEqual(audit["stages"]["witness_gate"]["cache_key"], "new-gate")
+            self.assertEqual(audit["stages"]["witness_a"]["cache_key"], "new-a")
+            self.assertNotIn("finalize", audit["stages"])
+            self.assertNotIn("prosecutor_initial", audit["stages"])
+            self.assertIsNone(audit["final_draft"])
+            self.assertEqual(audit["final_status"], "incomplete")
+            self.assertTrue(
+                any(item.get("cache_key") == "old-final" for item in audit["stage_history"])
+            )
 
     def test_http_api_serves_editor_and_only_allows_revision_creation(self):
         with tempfile.TemporaryDirectory() as directory:

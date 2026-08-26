@@ -49,6 +49,8 @@ def build_local_retrieval_index(
     *,
     dimensions: int = 48,
     min_document_frequency: int = 1,
+    source_identity: dict[str, Any] | None = None,
+    concordance_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an inspectable deterministic latent retrieval index.
 
@@ -123,6 +125,12 @@ def build_local_retrieval_index(
             "concordance_path": str(concordance_path),
             "records": document_count,
             "records_digest": canonical_digest(records),
+            "canonical_source_digest": (source_identity or {}).get(
+                "canonical_source_digest"
+            ),
+            "concordance_records_digest": (concordance_identity or {}).get(
+                "records_digest"
+            ),
         },
         "parameters": {
             "features": "normalized Latin word unigrams+bigrams",
@@ -177,6 +185,10 @@ def build_local_retrieval_index(
         "vocabulary": len(vocabulary),
         "dimensions": rank,
         "index_digest": payload["index_digest"],
+        "records_digest": payload["source"]["records_digest"],
+        "canonical_source_digest": payload["source"].get(
+            "canonical_source_digest"
+        ),
     }
 
 
@@ -199,6 +211,9 @@ class LocalRetrievalIndex:
             "index_version": self.value["index_version"],
             "index_digest": self.value["index_digest"],
             "records_digest": self.value["source"]["records_digest"],
+            "canonical_source_digest": self.value["source"].get(
+                "canonical_source_digest"
+            ),
             "dimensions": self.value["parameters"]["dimensions"],
         }
 

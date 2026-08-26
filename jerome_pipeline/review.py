@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from .cache import StageCache
 from .config import PipelineConfig
 from .editorial import EditorialRevisionStore, text_digest
-from .pipeline import STAGE_ORDER
+from .pipeline import STAGE_ORDER, active_dependency_lineage
 
 
 REVIEW_SCHEMA_VERSION = "jerome-review-v2"
@@ -1128,15 +1128,7 @@ class ReviewRepository:
                 )
             )
         ]
-        latest: dict[str, dict[str, Any]] = {}
-        for record in selected:
-            stage = record.get("stage")
-            if not isinstance(stage, str):
-                continue
-            if stage not in latest or str(record.get("finished_at", "")) > str(
-                latest[stage].get("finished_at", "")
-            ):
-                latest[stage] = record
+        latest, missing_dependencies, lineage = active_dependency_lineage(selected)
         final = _dict(_dict(latest.get("finalize")).get("output"))
         return {
             "schema_version": self.config.schema_version,
@@ -1155,6 +1147,11 @@ class ReviewRepository:
             "source_spans": chunk.get("source_spans", []),
             "annotations": chunk.get("annotations", []),
             "stages": latest,
+            "audit_lineage": {
+                **lineage,
+                "missing_dependencies": missing_dependencies,
+                "nonselected_history_count": max(0, len(selected) - len(latest)),
+            },
             "stage_history": sorted(
                 selected,
                 key=lambda item: (

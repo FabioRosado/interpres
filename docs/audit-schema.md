@@ -57,14 +57,16 @@ prevents accepted/corrected states from coexisting with unresolved or
 human-review items. These derived checks do not overwrite the raw response or
 the adjudicator-stage record.
 
-Completed audits are rooted at the latest complete `finalize` record and walk
-its recorded dependency cache keys and output hashes recursively. The
-top-level `stages` object therefore contains one coherent decision lineage,
-not an independent "latest record" from each stage. Later interrupted or
-forced attempts that were never consumed downstream remain visible in
-`stage_history` and are counted by `audit_lineage.nonselected_history_count`.
-If an exact dependency record is missing, the audit is incomplete rather than
-silently combining incompatible attempts.
+Active audits anchor on the newest dependency-bearing `witness_gate`, then
+select the furthest downstream record descended from that gate and walk its
+recorded dependency cache keys and output hashes recursively. A newer witness
+branch is therefore current even when it stops before `finalize`; an older
+completed final remains history. The top-level `stages` object contains one
+coherent lineage, not an independent "latest record" from each stage.
+Interrupted, superseded, or forced attempts remain visible in `stage_history`
+and are counted by `audit_lineage.nonselected_history_count`. If an exact
+dependency record is missing, the audit is incomplete rather than silently
+combining incompatible attempts.
 
 The current independently cached stage order is:
 

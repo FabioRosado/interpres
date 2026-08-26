@@ -9,7 +9,7 @@ WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
 ARABIC_RE = re.compile(r"(?<!\w)\d+(?!\w)")
 ROMAN_RE = re.compile(r"(?<![A-Za-z])[IVXLCDM]{2,}(?![A-Za-z])")
 CHECKS_VERSION = 8
-FINAL_CHECKS_VERSION = 3
+FINAL_CHECKS_VERSION = 4
 MAX_AUTOMATIC_EDIT_WORDS = 48
 MAX_SOURCE_COPY_WORDS = 7
 LATIN_NEGATIONS = {"non", "nec", "neque", "nihil", "numquam", "nunquam", "nullus", "nemo"}
@@ -462,7 +462,12 @@ def run_deterministic_checks(
 
 
 def run_final_draft_checks(
-    chunk: dict[str, Any], final_draft: str, *, applied_edits: list[dict[str, Any]] | None = None
+    chunk: dict[str, Any],
+    final_draft: str,
+    *,
+    applied_edits: list[dict[str, Any]] | None = None,
+    base_witness_text: str | None = None,
+    edit_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     findings = _translation_checks(
         chunk["target_latin"], final_draft, "final_draft"
@@ -515,13 +520,23 @@ def run_final_draft_checks(
         )
     )
 
+    edit_budget = edit_budget or {}
+    per_edit_limit = int(
+        edit_budget.get("max_words_per_edit", MAX_AUTOMATIC_EDIT_WORDS)
+    )
+    cumulative_limit = int(edit_budget.get("max_cumulative_words", 96))
+    ratio_limit = float(edit_budget.get("max_base_replacement_ratio", 0.25))
     oversized_edits = []
+    cumulative_words = 0
+    replaced_base_words = 0
     for index, edit in enumerate(applied_edits or []):
         if not isinstance(edit, dict):
             continue
         old_words = len(WORD_RE.findall(str(edit.get("old") or "")))
         new_words = len(WORD_RE.findall(str(edit.get("new") or "")))
-        if max(old_words, new_words) > MAX_AUTOMATIC_EDIT_WORDS:
+        cumulative_words += max(old_words, new_words)
+        replaced_base_words += old_words
+        if max(old_words, new_words) > per_edit_limit:
             oversized_edits.append(
                 {
                     "edit_index": index,
@@ -541,8 +556,37 @@ def run_final_draft_checks(
                 else "final_draft: adjudicator edits remain bounded corrections to the selected witness"
             ),
             evidence={
-                "maximum_automatic_edit_words": MAX_AUTOMATIC_EDIT_WORDS,
+                "maximum_automatic_edit_words": per_edit_limit,
                 "oversized_edits": oversized_edits,
+                "witness": "final_draft",
+            },
+        )
+    )
+
+    base_words = len(WORD_RE.findall(base_witness_text or ""))
+    replacement_ratio = (
+        replaced_base_words / base_words if base_words else (1.0 if replaced_base_words else 0.0)
+    )
+    cumulative_blocked = (
+        cumulative_words > cumulative_limit or replacement_ratio > ratio_limit
+    )
+    findings.append(
+        _finding(
+            "adjudicator_cumulative_edit_scope",
+            "warning" if cumulative_blocked else "pass",
+            "high" if cumulative_blocked else "low",
+            (
+                "final_draft: cumulative adjudicator edits exceed the safe automatic-correction scope"
+                if cumulative_blocked
+                else "final_draft: cumulative adjudicator edits remain a bounded correction"
+            ),
+            evidence={
+                "cumulative_edit_words": cumulative_words,
+                "maximum_cumulative_words": cumulative_limit,
+                "replaced_base_words": replaced_base_words,
+                "base_witness_words": base_words,
+                "base_replacement_ratio": round(replacement_ratio, 4),
+                "maximum_base_replacement_ratio": ratio_limit,
                 "witness": "final_draft",
             },
         )

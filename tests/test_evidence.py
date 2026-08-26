@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from jerome_pipeline.cache import canonical_digest
 from jerome_pipeline.evidence import (
     AuthorityIndex,
     EvidenceService,
     JeromeConcordance,
     ScriptureCorpus,
     bound_evidence_results,
+    build_concordance,
+    build_retrieval_index,
+    canonical_source_manifest,
     normalize_latin,
 )
-from jerome_pipeline.config import PipelineConfig
+from jerome_pipeline.config import PipelineConfig, load_config
+
+
+class FreshnessLexicon:
+    backend_name = "freshness-fixture"
+    contract_version = "fixture/v1"
+
+    def analyze_word(self, word):
+        raise AssertionError("lemma analysis is not used by this fixture")
 
 
 class FakeWebBackend:
@@ -60,6 +73,132 @@ class EvidenceTest(unittest.TestCase):
             book_boundary = concordance.exact("ignis in corde")[0]
             self.assertIsNone(book_boundary["context_after"])
             self.assertEqual(concordance.semantic("ignis corde")[0]["provenance"]["source_unit_id"], "u2")
+
+    def test_content_freshness_rejects_stale_concordance_and_retrieval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "book1.txt"
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nPrima sententia manet.\n",
+                encoding="utf-8",
+            )
+            base = load_config()
+            data = copy.deepcopy(base.data)
+            data["source"]["books"] = {"1": str(source)}
+            data["paths"]["artifacts"] = str(root / "artifacts")
+            data["paths"]["concordance"] = str(root / "concordance.jsonl")
+            data["paths"]["retrieval_index"] = str(root / "retrieval.json")
+            config = PipelineConfig(path=base.path, root=root, data=data)
+
+            concordance_build = build_concordance(
+                config, books=[1], include_lemmas=False
+            )
+            retrieval_build = build_retrieval_index(config)
+            manifest = canonical_source_manifest(config, [1])
+            self.assertEqual(
+                concordance_build["canonical_source_digest"],
+                manifest["canonical_source_digest"],
+            )
+            self.assertEqual(
+                retrieval_build["canonical_source_digest"],
+                manifest["canonical_source_digest"],
+            )
+            service = EvidenceService.from_config(config, FreshnessLexicon())
+            self.assertTrue(service.concordance.freshness["fresh"])
+            self.assertTrue(service.retrieval_freshness["fresh"])
+            self.assertEqual(
+                service.execute(
+                    {"kind": "jerome_phrase", "query": "Prima sententia"},
+                    requested_by="test",
+                )["status"],
+                "found",
+            )
+
+            # A single forged per-unit fingerprint is independently detected
+            # even when the metadata records digest is recomputed to match the
+            # tampered JSONL and the canonical-source digest is left intact.
+            concordance_path = config.path_value("concordance")
+            rows = [
+                json.loads(line)
+                for line in concordance_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            rows[0]["source_fingerprint"] = "forged-unit-fingerprint"
+            concordance_path.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+            metadata_path = concordance_path.with_suffix(
+                concordance_path.suffix + ".meta.json"
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["records_digest"] = canonical_digest(rows)
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            unit_tampered = EvidenceService.from_config(
+                config, FreshnessLexicon()
+            )
+            self.assertFalse(unit_tampered.concordance.freshness["fresh"])
+            self.assertIn(
+                "concordance unit fingerprints differ from canonical source",
+                unit_tampered.concordance.freshness["reasons"],
+            )
+            self.assertEqual(
+                unit_tampered.execute(
+                    {"kind": "jerome_phrase", "query": "Prima"},
+                    requested_by="test",
+                )["status"],
+                "stale_evidence",
+            )
+            build_concordance(config, books=[1], include_lemmas=False)
+
+            # Same filename, changed source content: both persisted artifacts
+            # must be refused by content identity rather than timestamps.
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nAltera sententia manet.\n",
+                encoding="utf-8",
+            )
+            stale = EvidenceService.from_config(config, FreshnessLexicon())
+            self.assertFalse(stale.concordance.freshness["fresh"])
+            self.assertEqual(
+                stale.execute(
+                    {"kind": "jerome_phrase", "query": "Prima"},
+                    requested_by="test",
+                )["status"],
+                "stale_evidence",
+            )
+            self.assertEqual(
+                stale.execute(
+                    {"kind": "semantic_rag", "query": "sententia"},
+                    requested_by="test",
+                )["status"],
+                "stale_evidence",
+            )
+
+            # Rebuilding only the concordance restores exact retrieval but the
+            # old semantic index remains stale until independently rebuilt.
+            build_concordance(config, books=[1], include_lemmas=False)
+            half_rebuilt = EvidenceService.from_config(config, FreshnessLexicon())
+            self.assertTrue(half_rebuilt.concordance.freshness["fresh"])
+            self.assertFalse(half_rebuilt.retrieval_freshness["fresh"])
+            self.assertEqual(
+                half_rebuilt.execute(
+                    {"kind": "semantic_rag", "query": "sententia"},
+                    requested_by="test",
+                )["status"],
+                "stale_evidence",
+            )
+            build_retrieval_index(config)
+            rebuilt = EvidenceService.from_config(config, FreshnessLexicon())
+            self.assertTrue(rebuilt.concordance.freshness["fresh"])
+            self.assertTrue(rebuilt.retrieval_freshness["fresh"])
 
     def test_scripture_reference_and_no_evidence_distinction(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -78,6 +78,9 @@ python translate_book_v4_1.py inspect-chunks --book 1 --chunk 3 --full
 ### `build-concordance`
 
 Build the exact/normalized/lemma Jerome concordance used by evidence lookup.
+The command also writes a content-addressed canonical-source manifest. A
+concordance whose unit fingerprints do not match the configured source is
+refused by evidence lookup until rebuilt.
 Repeat `--book` to include several configured books. `--no-lemmas` is a faster
 source-diagnostic mode and is not recommended for a production evidence run.
 
@@ -89,7 +92,8 @@ python translate_book_v4_1.py build-concordance --book 1 --no-lemmas
 ### `build-retrieval-index`
 
 Build the persisted local Latin TF-IDF/LSA retrieval index from the
-concordance. No model is called.
+concordance. The index records the concordance and canonical-source digests;
+stale combinations are refused. No model is called.
 
 ```powershell
 python translate_book_v4_1.py build-retrieval-index

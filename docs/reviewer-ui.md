@@ -29,6 +29,12 @@ analysis, morphology, and per-stage provenance. A sticky jump bar moves among
 these sections without hiding any of them. Selecting a source unit focuses
 linked records throughout the page.
 
+The active view is selected from the newest dependency-coherent witness-gate
+branch. If that branch stops at validation, downstream stages are shown as
+incomplete and an older machine final is not presented as current. Every
+nonselected attempt remains available in the immutable Decision Trail; active
+selection changes presentation, never historical artifacts.
+
 ## Immutability and save contract
 
 Machine stage-cache records, audits, witness outputs, adjudicator output, and

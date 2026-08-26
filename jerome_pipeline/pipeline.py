@@ -26,7 +26,9 @@ from .evidence import EvidenceService
 from .editorial import EditorialMemoryIndex
 from .prompts import (
     ADJUDICATOR_INPUT_BUDGET_POLICY_VERSION,
+    PROSECUTOR_INPUT_BUDGET_POLICY_VERSION,
     budgeted_adjudicator_prompt,
+    budgeted_prosecutor_prompt,
     grounded_prosecutor_prompt,
     prosecutor_prompt,
     structural_prompt,
@@ -78,7 +80,110 @@ STAGE_ORDER = [
     "adjudicator",
     "finalize",
 ]
-FINALIZATION_POLICY_VERSION = 6
+FINALIZATION_POLICY_VERSION = 7
+
+
+def active_dependency_lineage(
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Select the furthest descendant of the newest modern witness gate.
+
+    A new witness/quorum branch is authoritative even when it has not reached
+    finalization. Older completed decisions remain history rather than being
+    spliced onto that newer branch.
+    """
+
+    latest_by_stage: dict[str, dict[str, Any]] = {}
+    for record in records:
+        stage = str(record.get("stage") or "")
+        if stage not in latest_by_stage or str(record.get("finished_at", "")) > str(
+            latest_by_stage[stage].get("finished_at", "")
+        ):
+            latest_by_stage[stage] = record
+    gates = [record for record in records if record.get("stage") == "witness_gate"]
+    if not gates:
+        return latest_by_stage, [], {
+            "mode": "latest_legacy_diagnostic",
+            "root_stage": None,
+            "root_cache_key": None,
+        }
+    gate = max(gates, key=lambda item: str(item.get("finished_at", "")))
+    if not (gate.get("cache_material") or {}).get("dependencies"):
+        return latest_by_stage, [], {
+            "mode": "latest_legacy_diagnostic",
+            "root_stage": None,
+            "root_cache_key": None,
+        }
+
+    gate_lineage, gate_missing = EvidenceFirstPipeline._dependency_chain(records, gate)
+
+    # Translation-blind source stages are shared prerequisites for the current
+    # source even before a downstream stage explicitly links them.
+    for stage in ("morphology", "structural_parse"):
+        if stage in latest_by_stage and stage not in gate_lineage:
+            gate_lineage[stage] = latest_by_stage[stage]
+
+    def identity(record: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(record.get("stage") or ""),
+            str(record.get("cache_key") or ""),
+            canonical_digest(record.get("output")),
+        )
+
+    active_identities = {identity(record) for record in gate_lineage.values()}
+    active_by_stage = {
+        str(record.get("stage") or ""): identity(record)
+        for record in gate_lineage.values()
+    }
+    descendants = [gate]
+    changed = True
+    while changed:
+        changed = False
+        for record in records:
+            record_identity = identity(record)
+            if record_identity in active_identities:
+                continue
+            dependencies = {
+                (
+                    str(item.get("stage") or ""),
+                    str(item.get("cache_key") or ""),
+                    str(item.get("output_digest") or ""),
+                )
+                for item in (record.get("cache_material") or {}).get(
+                    "dependencies", []
+                )
+            }
+            conflicts = any(
+                dependency[0] in active_by_stage
+                and dependency != active_by_stage[dependency[0]]
+                for dependency in dependencies
+            )
+            if dependencies & active_identities and not conflicts:
+                active_identities.add(record_identity)
+                descendants.append(record)
+                changed = True
+
+    root = max(
+        descendants,
+        key=lambda item: (
+            STAGE_ORDER.index(str(item.get("stage")))
+            if str(item.get("stage")) in STAGE_ORDER
+            else -1,
+            str(item.get("finished_at", "")),
+        ),
+    )
+    lineage, missing = EvidenceFirstPipeline._dependency_chain(records, root)
+    missing = gate_missing + missing
+    for stage in ("morphology", "structural_parse"):
+        if stage in latest_by_stage and stage not in lineage:
+            lineage[stage] = latest_by_stage[stage]
+    return lineage, missing, {
+        "mode": "dependency_coherent",
+        "selection": "active_witness_dependency_branch",
+        "root_stage": root.get("stage"),
+        "root_cache_key": root.get("cache_key"),
+        "witness_gate_key": gate.get("cache_key"),
+    }
 
 
 class ModelOutputError(ValueError):
@@ -128,6 +233,15 @@ class AdjudicatorInputBudgetError(RuntimeError):
         self.receipt = receipt
 
 
+class ProsecutorInputBudgetError(RuntimeError):
+    def __init__(self, receipt: dict[str, Any]):
+        super().__init__(
+            receipt.get("failure_reason")
+            or "Prosecutor input exceeded its configured safe budget"
+        )
+        self.receipt = receipt
+
+
 class WitnessGateError(RuntimeError):
     def __init__(self, receipt: dict[str, Any]):
         super().__init__(
@@ -173,6 +287,8 @@ class EvidenceFirstPipeline:
         self.adjudicator_input_budget = config.section(
             "adjudicator_input_budget"
         )
+        self.prosecutor_input_budget = config.section("prosecutor_input_budget")
+        self.adjudicator_edit_budget = config.section("adjudicator_edit_budget")
         evidence_config = config.section("evidence")
         self.research_round_limits: dict[str, int] = {}
         for role in ("prosecutor", "adjudicator"):
@@ -401,6 +517,33 @@ class EvidenceFirstPipeline:
                     }
                 ],
             )
+        except ProsecutorInputBudgetError as exc:
+            record = stage_record(
+                stage=stage,
+                chunk_id=chunk["chunk_id"],
+                cache_key=cache_key,
+                cache_material=material,
+                pipeline_version=self.config.pipeline_version,
+                schema_version=self.config.schema_version,
+                prompt_version=self.config.prompt_version,
+                status="failed",
+                started_at=started,
+                output={"input_budget": exc.receipt},
+                error={
+                    "category": "prosecutor_input_budget_exceeded",
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                model=model_identity,
+                provider_attempts=[],
+                provenance=[
+                    {
+                        "kind": "prosecutor_input_budget",
+                        "policy_version": PROSECUTOR_INPUT_BUDGET_POLICY_VERSION,
+                        "provider_called": False,
+                    }
+                ],
+            )
         except WitnessGateError as exc:
             record = stage_record(
                 stage=stage,
@@ -568,6 +711,7 @@ class EvidenceFirstPipeline:
         witness_gate_record: dict[str, Any] | None = None,
         witness_a_record: dict[str, Any] | None = None,
         witness_b_record: dict[str, Any] | None = None,
+        edit_budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "adjudicator_key": adjudicator_record["cache_key"],
@@ -578,6 +722,7 @@ class EvidenceFirstPipeline:
             "witness_b_key": (witness_b_record or {}).get("cache_key"),
             "final_checks_version": FINAL_CHECKS_VERSION,
             "finalization_policy_version": FINALIZATION_POLICY_VERSION,
+            "adjudicator_edit_budget": edit_budget or {},
         }
 
     @staticmethod
@@ -715,6 +860,8 @@ class EvidenceFirstPipeline:
         witness_gate: dict[str, Any] | None = None,
         witness_a: str | None = None,
         witness_b: str | None = None,
+        deterministic_findings: list[dict[str, Any]] | None = None,
+        edit_budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply the deterministic acceptance policy to a model proposal."""
 
@@ -901,10 +1048,16 @@ class EvidenceFirstPipeline:
                     }
                 )
         decision["evidence_requests"] = []
+        final_base = (decision.get("coverage") or {}).get("base_witness")
+        base_witness_text = (
+            witness_a if final_base == "a" else witness_b if final_base == "b" else None
+        )
         final_checks = run_final_draft_checks(
             chunk,
             decision["final_draft"],
             applied_edits=decision.get("coverage", {}).get("applied_edits", []),
+            base_witness_text=base_witness_text,
+            edit_budget=edit_budget,
         )
         blocking = [
             finding
@@ -932,7 +1085,11 @@ class EvidenceFirstPipeline:
                     }
                 )
         all_evidence = prosecutor_evidence + adjudicator_evidence
-        evidence_validation = assess_adjudication_evidence(decision, all_evidence)
+        evidence_validation = assess_adjudication_evidence(
+            decision,
+            all_evidence,
+            deterministic_findings=deterministic_findings,
+        )
         decision["evidence_validation"] = evidence_validation
         if evidence_validation["issues"]:
             decision["status"] = "human_review"
@@ -968,7 +1125,6 @@ class EvidenceFirstPipeline:
             if isinstance(finding, dict)
             and finding.get("severity") == "high"
             and not evidence_validation["finding_support"].get(index)
-            and not evidence_validation["valid_strong_basis"]
         ]
         if unsupported_high:
             decision["status"] = "human_review"
@@ -1085,6 +1241,10 @@ class EvidenceFirstPipeline:
                 (witness_gate_record or {}).get("output"),
                 witness_a,
                 witness_b,
+                (latest.get("deterministic_checks", {}).get("output") or {}).get(
+                    "findings", []
+                ),
+                self.adjudicator_edit_budget,
             ),
             None,
             None,
@@ -1107,6 +1267,7 @@ class EvidenceFirstPipeline:
                 witness_gate_record,
                 witness_a_record,
                 witness_b_record,
+                self.adjudicator_edit_budget,
             ),
             dependencies=[
                 adjudicator_record,
@@ -1486,7 +1647,7 @@ class EvidenceFirstPipeline:
             checks = records["deterministic_checks"]["output"]
             if should_run("prosecutor_initial"):
                 spec = self._model("prosecutor")
-                prompt = prosecutor_prompt(
+                budgeted_prompt = budgeted_prosecutor_prompt(
                     chunk,
                     structural,
                     lexical,
@@ -1501,14 +1662,33 @@ class EvidenceFirstPipeline:
                             )
                         ),
                     ),
+                    budget=self.prosecutor_input_budget,
                     witness_gate=witness_gate,
                 )
+
+                def initial_prosecutor_operation():
+                    if not budgeted_prompt.fits or budgeted_prompt.prompt is None:
+                        raise ProsecutorInputBudgetError(budgeted_prompt.receipt)
+                    output, raw, actual_model, attempts, provenance = (
+                        self._structured_call(
+                            spec, budgeted_prompt.prompt, validate_prosecutor
+                        )
+                    )
+                    provenance.append(
+                        {
+                            "kind": "prosecutor_input_budget",
+                            "receipt": budgeted_prompt.receipt,
+                            "provider_called": True,
+                        }
+                    )
+                    return output, raw, actual_model, attempts, provenance
+
                 result = self._stage(
                     stage="prosecutor_initial",
                     chunk=chunk,
-                    inputs={"prompt_digest": self._prompt_digest(prompt), "witness_quorum": witness_gate.get("quorum"), "valid_witnesses": witness_gate.get("valid_witnesses", []), "invalid_witnesses_supplied_to_model": False if witness_gate.get("mode") == "degraded" else None, "dependency_keys": [records[name]["cache_key"] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")]},
+                    inputs={"prompt_digest": self._prompt_digest(budgeted_prompt.prompt) if budgeted_prompt.prompt is not None else None, "request_prompt": budgeted_prompt.prompt, "input_budget": budgeted_prompt.receipt, "witness_quorum": witness_gate.get("quorum"), "valid_witnesses": witness_gate.get("valid_witnesses", []), "invalid_witnesses_supplied_to_model": False if witness_gate.get("mode") == "degraded" else None, "dependency_keys": [records[name]["cache_key"] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")]},
                     dependencies=[records[name] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")],
-                    operation=lambda: self._structured_call(spec, prompt, validate_prosecutor),
+                    operation=initial_prosecutor_operation,
                     model=spec,
                     force=force("prosecutor_initial"),
                     retry_failed=retry_failed,
@@ -1939,6 +2119,8 @@ class EvidenceFirstPipeline:
                             records["witness_gate"]["output"],
                             witness_a,
                             witness_b,
+                            checks.get("findings", []),
+                            self.adjudicator_edit_budget,
                         ),
                         None,
                         None,
@@ -1956,6 +2138,7 @@ class EvidenceFirstPipeline:
                         records["witness_gate"],
                         records["witness_a"],
                         records["witness_b"],
+                        self.adjudicator_edit_budget,
                     ),
                     dependencies=[
                         records["adjudicator"],
@@ -2077,30 +2260,7 @@ class EvidenceFirstPipeline:
                 )
             )
         ]
-        finalize_candidates = [
-            record
-            for record in records
-            if record.get("stage") == "finalize"
-            and record.get("status") == "complete"
-        ]
-        if finalize_candidates:
-            root = max(
-                finalize_candidates,
-                key=lambda item: str(item.get("finished_at", "")),
-            )
-            latest, missing_dependencies = self._dependency_chain(records, root)
-        else:
-            # Without a completed final root there is no decision lineage to
-            # follow. Preserve the prior latest-stage diagnostic view.
-            latest = {}
-            for record in records:
-                stage = str(record.get("stage") or "")
-                if stage not in latest or str(record.get("finished_at", "")) > str(
-                    latest[stage].get("finished_at", "")
-                ):
-                    latest[stage] = record
-            root = None
-            missing_dependencies = []
+        latest, missing_dependencies, lineage = active_dependency_lineage(records)
         final = latest.get("finalize", {}).get("output", {})
         witness_quorum = latest.get("witness_gate", {}).get("output", {})
         # A locally re-finalized historical run may deliberately carry an
@@ -2130,9 +2290,7 @@ class EvidenceFirstPipeline:
             ),
             "stages": latest,
             "audit_lineage": {
-                "mode": "dependency_coherent" if root else "latest_diagnostic",
-                "root_stage": root.get("stage") if root else None,
-                "root_cache_key": root.get("cache_key") if root else None,
+                **lineage,
                 "missing_dependencies": missing_dependencies,
                 "nonselected_history_count": max(0, len(records) - len(latest)),
             },

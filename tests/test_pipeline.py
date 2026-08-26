@@ -9,12 +9,14 @@ from pathlib import Path
 
 from glossary import MorphologicalCandidate, Sense, WordAnalysis
 
-from jerome_pipeline.cache import stage_record, utc_now
+from jerome_pipeline.cache import canonical_digest, stage_record, utc_now
 from jerome_pipeline.config import PipelineConfig, load_config
+from jerome_pipeline.evidence import build_concordance
 from jerome_pipeline.pipeline import EvidenceFirstPipeline
 from jerome_pipeline.prompts import (
     adjudicator_prompt,
     budgeted_adjudicator_prompt,
+    budgeted_prosecutor_prompt,
     prosecutor_prompt,
 )
 from jerome_pipeline.providers import ProviderResponse
@@ -586,6 +588,8 @@ class PipelineVerticalTest(unittest.TestCase):
         self.assertIn('"base_witness": "b"', adjudicator)
 
     def test_live_prosecutor_regression_compacts_input_and_bounds_output(self):
+        chunk = self.chunk()
+        chunk["target_latin"] = "electri esse in medio " + chunk["target_latin"]
         structural = {
             "sentences": [
                 {
@@ -628,33 +632,110 @@ class PipelineVerticalTest(unittest.TestCase):
             }
             for index in range(96)
         ]
-        prompt = prosecutor_prompt(
-            self.chunk(),
+        flags.extend(
+            {
+                "token": f"trap{index}",
+                "offset": index,
+                "flag_type": "known_trap",
+                "senses": [f"sense{index}"],
+                "note": "A deterministic lexical trap.",
+            }
+            for index in range(25)
+        )
+        flags.append(
+            {
+                "token": "electri",
+                "offset": 0,
+                "flag_type": "known_trap",
+                "senses": ["electrum"],
+                "note": "Do not render as lightning.",
+            }
+        )
+        checks = {
+            "summary": {},
+            "findings": [
+                {
+                    "finding_id": "trap-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "Witness B renders electri as lightning.",
+                    "evidence": {
+                        "source_phrase": "electri",
+                        "matched_wrong_rendering": "lightning",
+                        "witness": "witness_b",
+                    },
+                }
+            ],
+        }
+        result = budgeted_prosecutor_prompt(
+            chunk,
             structural,
             {"flags": flags},
-            {"summary": {}, "findings": [], "limits": "fixture"},
-            "Witness A",
-            "Witness B",
+            checks,
+            "INVALID_A_SENTINEL",
+            "VALID_B_LIGHTNING_SENTINEL",
             max_evidence_requests=6,
+            budget={
+                "max_prompt_utf8_bytes": 44_000,
+                "max_request_utf8_bytes": 44_000,
+                "max_estimated_prompt_tokens": 16_000,
+                "estimator_bytes_per_token": 2.75,
+            },
+            witness_gate={
+                "mode": "degraded",
+                "quorum": "single_valid_b",
+                "valid_witnesses": ["witness_b"],
+                "invalid_witnesses": ["witness_a"],
+                "allowed_base_witnesses": ["b"],
+            },
+        )
+        self.assertTrue(result.fits, result.receipt)
+        prompt = result.prompt or ""
+        self.assertIn(chunk["target_latin"], prompt)
+        self.assertIn("VALID_B_LIGHTNING_SENTINEL", prompt)
+        self.assertNotIn("INVALID_A_SENTINEL", prompt)
+        self.assertIn("lightning", prompt)
+        self.assertIn("electri", prompt)
+        self.assertIn("trap24", prompt)
+        self.assertNotIn('"latin":"sententia 0"', prompt)
+        self.assertGreater(result.receipt["filtered"]["lexical_flags"], 60)
+        self.assertLess(
+            result.receipt["final"]["prompt_utf8_bytes"],
+            result.receipt["historical_unbounded"]["prompt_utf8_bytes"],
+        )
+        self.assertLessEqual(result.receipt["final"]["prompt_utf8_bytes"], 44_000)
+        self.assertLessEqual(result.receipt["final"]["estimated_prompt_tokens"], 16_000)
+        self.assertEqual(
+            sum(result.receipt["component_utf8_bytes"].values()),
+            result.receipt["final"]["prompt_utf8_bytes"],
         )
 
-        dense_structural = json.dumps(
-            structural,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        pretty_structural = json.dumps(
-            structural,
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-        )
-        self.assertIn(dense_structural, prompt)
-        self.assertNotIn(pretty_structural, prompt)
-        self.assertIn("at most 12 distinct substantive challenges", prompt)
-        self.assertIn("at most 6 evidence requests", prompt)
-        self.assertIn("Emit minified JSON on one line", prompt)
+    def test_prosecutor_budget_fails_closed_before_provider_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = load_config()
+            data = copy.deepcopy(base.data)
+            data["paths"]["cache"] = str(Path(directory) / "cache")
+            data["paths"]["concordance"] = str(Path(directory) / "missing.jsonl")
+            data["prosecutor_input_budget"] = {
+                "max_prompt_utf8_bytes": 500,
+                "max_request_utf8_bytes": 500,
+                "max_estimated_prompt_tokens": 100,
+                "estimator_bytes_per_token": 2.75,
+            }
+            config = PipelineConfig(path=base.path, root=base.root, data=data)
+            provider = FakeProvider()
+            result = EvidenceFirstPipeline(
+                config, lexicon=FakeLexicon(), provider=provider
+            ).run_chunk(self.chunk(), through="prosecutor_initial")
+            self.assertEqual(result["failed_stage"], "prosecutor_initial")
+            failed = result["records"]["prosecutor_initial"]
+            self.assertEqual(
+                failed["error"]["category"], "prosecutor_input_budget_exceeded"
+            )
+            self.assertFalse(failed["output"]["input_budget"]["fits"])
+            self.assertNotIn("prosecutor", provider.calls)
+            self.assertEqual(failed["provider_attempts"], [])
 
     def test_adjudicator_budget_compacts_lower_priority_material_and_preserves_core(self):
         challenge_claim = "Witness A reverses the decisive Latin polarity."
@@ -856,7 +937,7 @@ class PipelineVerticalTest(unittest.TestCase):
                 "estimator_bytes_per_token": 3.0,
             },
         )
-        self.assertTrue(result.fits)
+        self.assertTrue(result.fits, result.receipt)
         self.assertEqual(
             result.receipt["serialization"],
             "dense_json",
@@ -1091,6 +1172,25 @@ class PipelineVerticalTest(unittest.TestCase):
                 "READ_ONLY_CONTEXT", witness_inputs["request_prompt"]
             )
             self.assertTrue(witness_inputs["output_budget"]["proceed"])
+            prosecutor_inputs = audit["stages"]["prosecutor_initial"][
+                "cache_material"
+            ]["inputs"]
+            prosecutor_request = prosecutor_inputs["request_prompt"]
+            self.assertIsInstance(prosecutor_request, str)
+            self.assertIn(chunk["target_latin"], prosecutor_request)
+            self.assertIn("He did not come.", prosecutor_request)
+            self.assertIn("He has not come.", prosecutor_request)
+            self.assertEqual(
+                prosecutor_inputs["prompt_digest"],
+                canonical_digest(prosecutor_request),
+            )
+            self.assertEqual(
+                prosecutor_inputs["input_budget"]["final"][
+                    "prompt_utf8_bytes"
+                ],
+                len(prosecutor_request.encode("utf-8")),
+            )
+            self.assertTrue(prosecutor_inputs["input_budget"]["fits"])
             adjudicator_schemas = [
                 schema
                 for role, schema in provider.response_schemas
@@ -1294,6 +1394,165 @@ class PipelineVerticalTest(unittest.TestCase):
         self.assertEqual(corrected_output["final_status"], "human_review")
         self.assertFalse(corrected_output["automatic_acceptance_allowed"])
 
+    def test_cumulative_small_edits_block_automatic_normal_quorum(self):
+        chunk = self.chunk()
+        chunk["target_latin"] = "venit"
+        base = " ".join(["verbum"] * 200)
+        decision = {
+            "status": "corrected",
+            "final_draft": "he came",
+            "summary": "Many individually small corrections.",
+            "coverage": {
+                "all_clauses_accounted_for": True,
+                "omissions_corrected": [],
+                "base_witness": "a",
+                "applied_edits": [
+                    {
+                        "old": " ".join(["verbum"] * 10),
+                        "new": " ".join(["word"] * 10),
+                        "reason": "fixture",
+                        "evidence_ids": [],
+                    }
+                    for _ in range(10)
+                ],
+            },
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        output = EvidenceFirstPipeline._finalize_output(
+            chunk,
+            decision,
+            [],
+            [],
+            {
+                "quorum": "both_valid",
+                "mode": "normal",
+                "allowed_base_witnesses": ["a", "b"],
+                "automatic_acceptance_allowed": True,
+                "invalid_witnesses": [],
+            },
+            base,
+            "other witness",
+            [],
+            {
+                "max_words_per_edit": 48,
+                "max_cumulative_words": 96,
+                "max_base_replacement_ratio": 0.25,
+            },
+        )
+        self.assertEqual(output["final_status"], "human_review")
+        self.assertFalse(output["publication_eligible"])
+        cumulative = next(
+            item for item in output["final_checks"]["findings"]
+            if item["check"] == "adjudicator_cumulative_edit_scope"
+        )
+        self.assertEqual(cumulative["severity"], "high")
+
+        degraded = EvidenceFirstPipeline._finalize_output(
+            chunk,
+            decision,
+            [],
+            [],
+            {
+                "quorum": "single_valid_a",
+                "mode": "degraded",
+                "valid_witnesses": ["witness_a"],
+                "invalid_witnesses": ["witness_b"],
+                "allowed_base_witnesses": ["a"],
+                "automatic_acceptance_allowed": False,
+            },
+            base,
+            "invalid other witness",
+            [],
+            {
+                "max_words_per_edit": 48,
+                "max_cumulative_words": 96,
+                "max_base_replacement_ratio": 0.25,
+            },
+        )
+        self.assertEqual(degraded["final_status"], "human_review")
+        self.assertFalse(degraded["publication_eligible"])
+        self.assertFalse(degraded["automatic_acceptance_allowed"])
+
+    def test_each_high_finding_requires_its_own_support_in_finalizer(self):
+        decision = {
+            "status": "corrected",
+            "final_draft": "He did not come.",
+            "summary": "One supported and one unsupported serious finding.",
+            "coverage": {
+                "all_clauses_accounted_for": True,
+                "omissions_corrected": [],
+                "base_witness": "a",
+                "applied_edits": [],
+            },
+            "findings": [
+                {
+                    "latin": "electri",
+                    "english": "electrum",
+                    "type": "lexical",
+                    "severity": "high",
+                    "resolution": "Use electrum for electri.",
+                    "reason": "The electri corpus receipt supports this finding.",
+                    "evidence_ids": ["ev-electri"],
+                },
+                {
+                    "latin": "Matthaei",
+                    "english": "Matthew",
+                    "type": "omission",
+                    "severity": "high",
+                    "resolution": "Restore a separate Matthew clause.",
+                    "reason": "This distinct serious claim has no support.",
+                    "evidence_ids": [],
+                },
+            ],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        output = EvidenceFirstPipeline._finalize_output(
+            {**self.chunk(), "target_latin": "electri Matthaei non venit"},
+            decision,
+            [
+                {
+                    "evidence_id": "ev-electri",
+                    "request": {
+                        "kind": "jerome_phrase",
+                        "query": "electri",
+                        "reason": "Resolve the electri lexical issue.",
+                    },
+                    "status": "found",
+                    "evidence_class": "retrieved_evidence",
+                    "results": [{"text": "electri"}],
+                }
+            ],
+            [],
+            {
+                "quorum": "both_valid",
+                "mode": "normal",
+                "allowed_base_witnesses": ["a", "b"],
+                "automatic_acceptance_allowed": True,
+                "invalid_witnesses": [],
+            },
+            "He did not come.",
+            "He has not come.",
+        )
+        support = output["decision"]["evidence_validation"]["finding_support"]
+        self.assertTrue(support[0])
+        self.assertFalse(support[1])
+        self.assertEqual(output["final_status"], "human_review")
+        self.assertFalse(output["publication_eligible"])
+        self.assertTrue(
+            any(
+                item.get("latin") == "Matthaei"
+                and "lacks either" in item.get("issue", "")
+                for item in output["human_review_requests"]
+            )
+        )
+
     def test_audit_follows_final_dependency_chain_not_newer_orphan_stage(self):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
@@ -1360,30 +1619,17 @@ class PipelineVerticalTest(unittest.TestCase):
             data = copy.deepcopy(base.data)
             cache = Path(directory) / "cache"
             concordance = Path(directory) / "concordance.jsonl"
-            concordance.write_text(
-                json.dumps(
-                    {
-                        "source_unit_id": "u-evidence",
-                        "book": 1,
-                        "page": "0001A",
-                        "text": "non venit",
-                        "normalized": "non uenit",
-                        "lemmas": ["venio"],
-                        "source_fingerprint": "fixture",
-                        "provenance": {
-                            "corpus": "fixture",
-                            "work": "fixture",
-                            "source_unit_id": "u-evidence",
-                            "page": "0001A",
-                        },
-                    }
-                )
-                + "\n",
+            source = Path(directory) / "book1.txt"
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nnon venit.\n",
                 encoding="utf-8",
             )
             data["paths"]["cache"] = str(cache)
             data["paths"]["concordance"] = str(concordance)
+            data["source"]["books"] = {"1": str(source)}
+            data["paths"]["artifacts"] = str(Path(directory) / "artifacts")
             config = PipelineConfig(path=base.path, root=base.root, data=data)
+            build_concordance(config, books=[1], include_lemmas=False)
             provider = EvidenceRequestingProvider()
             pipeline = EvidenceFirstPipeline(
                 config,

@@ -15,10 +15,54 @@ from glossary import WhitakersWordsBackend, analysis_to_json, tokenize_with_offs
 from .cache import canonical_digest, utc_now
 from .config import PipelineConfig
 from .retrieval import LocalRetrievalIndex, build_local_retrieval_index
-from .source import preprocess_book
+from .source import parse_source, preprocess_book
 
 
-EVIDENCE_SERVICE_VERSION = 2
+EVIDENCE_SERVICE_VERSION = 3
+CONCORDANCE_VERSION = 2
+
+
+def _source_manifest(parsed_books: list[dict[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "schema": "canonical-source-manifest/v1",
+        "books": [
+            {
+                "book": parsed["book"],
+                "source_fingerprint": parsed["source_fingerprint"],
+                "clean_fingerprint": parsed["clean_fingerprint"],
+                "units": [
+                    {
+                        "source_unit_id": unit["source_unit_id"],
+                        "fingerprint": unit["fingerprint"],
+                    }
+                    for unit in parsed["source_units"]
+                ],
+            }
+            for parsed in sorted(parsed_books, key=lambda item: int(item["book"]))
+        ],
+    }
+    value["canonical_source_digest"] = canonical_digest(value)
+    return value
+
+
+def canonical_source_manifest(
+    config: PipelineConfig, books: list[int] | None = None
+) -> dict[str, Any]:
+    configured = sorted(int(key) for key in config.section("source").get("books", {}))
+    selected = books or configured
+    parsed = [
+        parse_source(
+            config.source_path(book).read_text(encoding="utf-8"),
+            book=book,
+            metadata=config.section("source").get("metadata", {}),
+        )
+        for book in selected
+    ]
+    return _source_manifest(parsed)
+
+
+def _concordance_metadata_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".meta.json")
 
 
 def normalize_latin(value: str) -> str:
@@ -106,6 +150,16 @@ def _write_jsonl(path: Path, values: Iterable[dict[str, Any]]) -> None:
     temporary.replace(path)
 
 
+def _write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def build_concordance(
     config: PipelineConfig,
     *,
@@ -118,8 +172,10 @@ def build_concordance(
     lexicon = backend or (WhitakersWordsBackend() if include_lemmas else None)
     token_cache: dict[str, set[str]] = {}
     records: list[dict[str, Any]] = []
+    parsed_books: list[dict[str, Any]] = []
     for book in selected_books:
         parsed, _ = preprocess_book(config, book)
+        parsed_books.append(parsed)
         for unit in parsed["source_units"]:
             lemmas: set[str] = set()
             if lexicon is not None:
@@ -150,17 +206,42 @@ def build_concordance(
             )
     path = config.path_value("concordance")
     _write_jsonl(path, records)
+    manifest = _source_manifest(parsed_books)
+    metadata = {
+        "schema": "jerome-concordance-metadata/v2",
+        "concordance_version": CONCORDANCE_VERSION,
+        "built_at": utc_now(),
+        "books": selected_books,
+        "records": len(records),
+        "records_digest": canonical_digest(records),
+        "canonical_source": manifest,
+        "canonical_source_digest": manifest["canonical_source_digest"],
+        "lemma_index": include_lemmas,
+    }
+    _write_json(_concordance_metadata_path(path), metadata)
     return {
         "path": str(path),
+        "metadata_path": str(_concordance_metadata_path(path)),
         "records": len(records),
         "books": selected_books,
         "lemma_index": include_lemmas,
         "unique_analyzed_forms": len(token_cache),
+        "records_digest": metadata["records_digest"],
+        "canonical_source_digest": metadata["canonical_source_digest"],
     }
 
 
 def build_retrieval_index(config: PipelineConfig) -> dict[str, Any]:
     settings = config.section("retrieval")
+    expected = canonical_source_manifest(config)
+    concordance = JeromeConcordance(
+        config.path_value("concordance"), expected_manifest=expected
+    )
+    if not concordance.freshness["fresh"]:
+        raise ValueError(
+            "Cannot build retrieval index from stale concordance: "
+            + "; ".join(concordance.freshness["reasons"])
+        )
     return build_local_retrieval_index(
         config.path_value("concordance"),
         config.path_value("retrieval_index"),
@@ -168,13 +249,65 @@ def build_retrieval_index(config: PipelineConfig) -> dict[str, Any]:
         min_document_frequency=int(
             settings.get("min_document_frequency", 1)
         ),
+        source_identity=expected,
+        concordance_identity=concordance.identity,
     )
 
 
 class JeromeConcordance:
-    def __init__(self, path: Path):
+    def __init__(
+        self, path: Path, *, expected_manifest: dict[str, Any] | None = None
+    ):
         self.path = path
         self.records = _read_jsonl(path)
+        metadata_path = _concordance_metadata_path(path)
+        try:
+            self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            self.metadata = {}
+        reasons: list[str] = []
+        records_digest = canonical_digest(self.records)
+        if self.metadata.get("records_digest") != records_digest:
+            reasons.append("concordance records do not match persisted records_digest")
+        if expected_manifest is not None:
+            if (
+                self.metadata.get("canonical_source_digest")
+                != expected_manifest.get("canonical_source_digest")
+            ):
+                reasons.append("concordance canonical source digest is stale")
+            expected_units = {
+                item["source_unit_id"]: item["fingerprint"]
+                for book in expected_manifest.get("books", [])
+                for item in book.get("units", [])
+            }
+            actual_units = {
+                str(item.get("source_unit_id")): str(item.get("source_fingerprint"))
+                for item in self.records
+            }
+            if actual_units != expected_units:
+                reasons.append("concordance unit fingerprints differ from canonical source")
+        self.freshness = {
+            "fresh": not reasons,
+            "status": "fresh" if not reasons else "stale_evidence",
+            "reasons": reasons,
+            "expected_canonical_source_digest": (
+                expected_manifest or {}
+            ).get("canonical_source_digest"),
+            "actual_canonical_source_digest": self.metadata.get(
+                "canonical_source_digest"
+            ),
+            "records_digest": records_digest,
+        }
+
+    @property
+    def identity(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "concordance_version": self.metadata.get("concordance_version"),
+            "records_digest": self.freshness["records_digest"],
+            "canonical_source_digest": self.metadata.get("canonical_source_digest"),
+            "freshness": self.freshness,
+        }
 
     def _contextual_result(
         self,
@@ -618,6 +751,8 @@ class EvidenceService:
         retrieval: LocalRetrievalIndex | None = None,
         authorities: dict[str, AuthorityIndex] | None = None,
         web_backend: ExternalResearchBackend | None = None,
+        canonical_manifest: dict[str, Any] | None = None,
+        retrieval_freshness: dict[str, Any] | None = None,
     ):
         self.config = config
         self.lexicon = lexicon
@@ -626,6 +761,12 @@ class EvidenceService:
         self.retrieval = retrieval
         self.authorities = authorities or {}
         self.web_backend = web_backend
+        self.canonical_manifest = canonical_manifest or {}
+        self.retrieval_freshness = retrieval_freshness or {
+            "fresh": retrieval is not None,
+            "status": "fresh" if retrieval is not None else "unavailable",
+            "reasons": [],
+        }
 
     def cache_identity(self) -> dict[str, Any]:
         def file_identity(path: Path) -> dict[str, Any]:
@@ -645,9 +786,20 @@ class EvidenceService:
                 "backend": self.lexicon.backend_name,
                 "contract": self.lexicon.contract_version,
             },
-            "concordance": file_identity(self.config.path_value("concordance")),
+            "canonical_source_digest": self.canonical_manifest.get(
+                "canonical_source_digest"
+            ),
+            "concordance": (
+                getattr(
+                    self.concordance,
+                    "identity",
+                    file_identity(self.config.path_value("concordance")),
+                )
+                if self.concordance is not None
+                else file_identity(self.config.path_value("concordance"))
+            ),
             "retrieval_index": (
-                self.retrieval.identity
+                {**self.retrieval.identity, "freshness": self.retrieval_freshness}
                 if self.retrieval is not None
                 else file_identity(self.config.path_value("retrieval_index"))
             ),
@@ -678,8 +830,15 @@ class EvidenceService:
 
     @classmethod
     def from_config(cls, config: PipelineConfig, lexicon: WhitakersWordsBackend):
+        expected_manifest = canonical_source_manifest(config)
         concordance_path = config.path_value("concordance")
-        concordance = JeromeConcordance(concordance_path) if concordance_path.exists() else None
+        concordance = (
+            JeromeConcordance(
+                concordance_path, expected_manifest=expected_manifest
+            )
+            if concordance_path.exists()
+            else None
+        )
         retrieval_path = config.path_value("retrieval_index")
         try:
             retrieval = (
@@ -689,6 +848,29 @@ class EvidenceService:
             )
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             retrieval = None
+        retrieval_reasons: list[str] = []
+        if retrieval is not None:
+            if (
+                retrieval.identity.get("canonical_source_digest")
+                != expected_manifest.get("canonical_source_digest")
+            ):
+                retrieval_reasons.append("retrieval index canonical source digest is stale")
+            if concordance is None or not concordance.freshness["fresh"]:
+                retrieval_reasons.append("retrieval index depends on unavailable or stale concordance")
+            elif (
+                retrieval.identity.get("records_digest")
+                != concordance.identity.get("records_digest")
+            ):
+                retrieval_reasons.append("retrieval index records digest differs from concordance")
+        retrieval_freshness = {
+            "fresh": retrieval is not None and not retrieval_reasons,
+            "status": (
+                "fresh"
+                if retrieval is not None and not retrieval_reasons
+                else "stale_evidence" if retrieval is not None else "unavailable"
+            ),
+            "reasons": retrieval_reasons,
+        }
         try:
             scripture = ScriptureCorpus(
                 config.path_value("vulgate"),
@@ -719,6 +901,8 @@ class EvidenceService:
             scripture=scripture,
             retrieval=retrieval,
             authorities=authorities,
+            canonical_manifest=expected_manifest,
+            retrieval_freshness=retrieval_freshness,
         )
 
     def execute(
@@ -762,6 +946,15 @@ class EvidenceService:
             if kind in {"jerome_phrase", "jerome_lemma"}:
                 if self.concordance is None:
                     return {**base, "status": "unavailable", "evidence_class": "retrieved_evidence", "results": [], "message": "Jerome concordance has not been built"}
+                if not getattr(self.concordance, "freshness", {"fresh": True})["fresh"]:
+                    return {
+                        **base,
+                        "status": "stale_evidence",
+                        "evidence_class": "retrieved_evidence",
+                        "results": [],
+                        "message": "Jerome concordance does not match the configured canonical source; rebuild required",
+                        "freshness": self.concordance.freshness,
+                    }
                 if kind == "jerome_phrase":
                     results = self.concordance.exact(query, normalized=False, limit=limit)
                     if not results:
@@ -784,6 +977,15 @@ class EvidenceService:
                             "Persisted local retrieval index is unavailable; "
                             "run build-retrieval-index"
                         ),
+                    }
+                if not self.retrieval_freshness["fresh"]:
+                    return {
+                        **base,
+                        "status": "stale_evidence",
+                        "evidence_class": "retrieved_evidence",
+                        "results": [],
+                        "message": "Local retrieval index does not match the current concordance/canonical source; rebuild required",
+                        "freshness": self.retrieval_freshness,
                     }
                 results = self.retrieval.search(query, limit=limit)
                 return {

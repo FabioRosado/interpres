@@ -68,6 +68,18 @@ class ProductionModelConfigTest(unittest.TestCase):
             config.model("prosecutor", profile="smoke").max_output_tokens,
             3200,
         )
+        self.assertEqual(
+            config.section("prosecutor_input_budget")["max_estimated_prompt_tokens"],
+            16000,
+        )
+        self.assertEqual(
+            config.section("adjudicator_edit_budget"),
+            {
+                "max_words_per_edit": 48,
+                "max_cumulative_words": 96,
+                "max_base_replacement_ratio": 0.25,
+            },
+        )
 
 
 if __name__ == "__main__":

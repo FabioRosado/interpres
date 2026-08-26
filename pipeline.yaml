@@ -177,6 +177,14 @@ structural_output_budget:
   large_sentence_threshold: 12
   large_max_output_tokens: 7200
 
+prosecutor_input_budget:
+  # 16,000 input tokens plus the 4,200-token completion cap leaves more than
+  # 12,500 tokens of safety headroom in the 32,768-token model context.
+  max_prompt_utf8_bytes: 44000
+  max_request_utf8_bytes: 44000
+  max_estimated_prompt_tokens: 16000
+  estimator_bytes_per_token: 2.75
+
 adjudicator_input_budget:
   # The live Qwen provider repeatedly stopped evaluating at about 16,386
   # prompt tokens. This conservative estimator and byte ceiling leave margin
@@ -185,6 +193,11 @@ adjudicator_input_budget:
   max_request_utf8_bytes: 52000
   max_estimated_prompt_tokens: 15000
   estimator_bytes_per_token: 3.0
+
+adjudicator_edit_budget:
+  max_words_per_edit: 48
+  max_cumulative_words: 96
+  max_base_replacement_ratio: 0.25
 
 retrieval:
   method: "latin_tfidf_lsa_v1"

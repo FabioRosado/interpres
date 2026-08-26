@@ -199,6 +199,70 @@ class ChecksTest(unittest.TestCase):
             finding["evidence"]["oversized_edits"][0]["old_word_count"], 73
         )
 
+    def test_many_small_edits_trigger_cumulative_word_and_ratio_guard(self):
+        base = " ".join(["verbum"] * 200)
+        edits = [
+            {"old": " ".join(["verbum"] * 10), "new": " ".join(["word"] * 10)}
+            for _ in range(10)
+        ]
+        result = run_final_draft_checks(
+            self._chunk("venit"),
+            "he came",
+            applied_edits=edits,
+            base_witness_text=base,
+            edit_budget={
+                "max_words_per_edit": 48,
+                "max_cumulative_words": 96,
+                "max_base_replacement_ratio": 0.25,
+            },
+        )
+        by_check = {item["check"]: item for item in result["findings"]}
+        self.assertEqual(by_check["adjudicator_edit_scope"]["status"], "pass")
+        cumulative = by_check["adjudicator_cumulative_edit_scope"]
+        self.assertEqual(cumulative["status"], "warning")
+        self.assertEqual(cumulative["severity"], "high")
+        self.assertEqual(cumulative["evidence"]["cumulative_edit_words"], 100)
+        self.assertEqual(cumulative["evidence"]["base_replacement_ratio"], 0.5)
+
+        small = run_final_draft_checks(
+            self._chunk("venit"),
+            "he came",
+            applied_edits=[{"old": "verbum unum", "new": "two words"}],
+            base_witness_text=" ".join(["verbum"] * 100),
+        )
+        small_check = next(
+            item for item in small["findings"]
+            if item["check"] == "adjudicator_cumulative_edit_scope"
+        )
+        self.assertEqual(small_check["status"], "pass")
+
+    def test_large_percentage_replacement_blocks_below_cumulative_word_limit(self):
+        base_words = [f"base{index}" for index in range(20)]
+        old = " ".join(base_words[:6])
+        result = run_final_draft_checks(
+            self._chunk("venit"),
+            "he came",
+            applied_edits=[
+                {
+                    "old": old,
+                    "new": "one two three four five six",
+                    "reason": "fixture",
+                }
+            ],
+            base_witness_text=" ".join(base_words),
+            edit_budget={
+                "max_words_per_edit": 48,
+                "max_cumulative_words": 96,
+                "max_base_replacement_ratio": 0.25,
+            },
+        )
+        by_check = {item["check"]: item for item in result["findings"]}
+        self.assertEqual(by_check["adjudicator_edit_scope"]["status"], "pass")
+        cumulative = by_check["adjudicator_cumulative_edit_scope"]
+        self.assertEqual(cumulative["status"], "warning")
+        self.assertEqual(cumulative["evidence"]["cumulative_edit_words"], 6)
+        self.assertEqual(cumulative["evidence"]["base_replacement_ratio"], 0.3)
+
 
 class ChallengeMutationTest(unittest.TestCase):
     def test_supported_mutations(self):

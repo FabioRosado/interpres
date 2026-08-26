@@ -10,11 +10,24 @@ from .source import split_sentences
 
 
 ADJUDICATOR_INPUT_BUDGET_POLICY_VERSION = 2
+PROSECUTOR_INPUT_BUDGET_POLICY_VERSION = 1
 
 
 @dataclass(frozen=True)
 class BudgetedAdjudicatorPrompt:
     """A provider-ready prompt plus an auditable, deterministic budget receipt."""
+
+    prompt: str | None
+    receipt: dict[str, Any]
+
+    @property
+    def fits(self) -> bool:
+        return self.prompt is not None and bool(self.receipt.get("fits"))
+
+
+@dataclass(frozen=True)
+class BudgetedProsecutorPrompt:
+    """A provider-ready prosecutor prompt and its deterministic input receipt."""
 
     prompt: str | None
     receipt: dict[str, Any]
@@ -248,6 +261,7 @@ def _compact_deterministic_issues(checks: dict[str, Any]) -> dict[str, Any]:
         }
         findings.append(
             {
+                "finding_id": finding.get("finding_id"),
                 "check": finding.get("check"),
                 "status": finding.get("status"),
                 "severity": finding.get("severity"),
@@ -741,6 +755,414 @@ SOURCE ANNOTATIONS:
 """
 
 
+def _prosecutor_terms(findings: list[dict[str, Any]]) -> set[str]:
+    terms: set[str] = set()
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding, dict) else {}
+        values: list[Any] = [finding.get("message")]
+        if isinstance(evidence, dict):
+            values.extend(
+                (evidence.get("source_phrase"), evidence.get("matched_wrong_rendering"))
+            )
+            for mismatch in evidence.get("curated_mismatches", []):
+                if isinstance(mismatch, dict):
+                    values.extend((mismatch.get("source_form"), mismatch.get("expected")))
+        for value in values:
+            terms.update(
+                word.casefold()
+                for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", str(value or ""))
+                if len(word) >= 3
+            )
+    return terms
+
+
+def _prosecutor_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    evidence = finding.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    return {
+        "finding_id": finding.get("finding_id"),
+        "check": finding.get("check"),
+        "status": finding.get("status"),
+        "severity": finding.get("severity"),
+        "message": finding.get("message"),
+        "evidence": {
+            key: evidence[key]
+            for key in (
+                "source_phrase",
+                "matched_wrong_rendering",
+                "expected",
+                "witness",
+                "curated_mismatches",
+                "missing",
+                "reference",
+                "source_unit_ids",
+            )
+            if key in evidence
+        },
+    }
+
+
+def _prosecutor_flag(flag: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "token": flag.get("token"),
+        "offset": flag.get("offset"),
+        "flag_type": flag.get("flag_type"),
+        "senses": flag.get("senses", [])[:4],
+        "note": str(flag.get("note", ""))[:240],
+    }
+
+
+def _prosecutor_structure(
+    structural: dict[str, Any], target: str, relevant_terms: set[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project structure to offsets and relationships without duplicating Latin."""
+
+    relevant: list[dict[str, Any]] = []
+    lower: list[dict[str, Any]] = []
+    cursor = 0
+    for index, sentence in enumerate(structural.get("sentences", []), 1):
+        if not isinstance(sentence, dict):
+            continue
+        latin = str(sentence.get("latin") or "")
+        start = target.find(latin, cursor) if latin else -1
+        if start < 0 and latin:
+            start = target.find(latin)
+        end = start + len(latin) if start >= 0 else None
+        if end is not None:
+            cursor = end
+        item: dict[str, Any] = {
+            "sentence": index,
+            "target_start": start if start >= 0 else None,
+            "target_end": end,
+            "main_verbs": [
+                {key: verb.get(key, "") for key in ("form", "lemma", "mood", "tense", "voice")}
+                for verb in sentence.get("main_verbs", [])
+                if isinstance(verb, dict)
+            ],
+        }
+        for key in (
+            "subject",
+            "objects",
+            "subordinate_clauses",
+            "attachments",
+            "referents",
+            "idioms",
+            "alternatives",
+        ):
+            if sentence.get(key):
+                item[key] = sentence[key]
+        terms = {
+            word.casefold()
+            for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", latin)
+        }
+        uncertain = any(
+            sentence.get(key)
+            for key in ("alternatives", "attachments", "referents")
+        ) or bool(
+            isinstance(sentence.get("subject"), dict)
+            and sentence["subject"].get("uncertain")
+        )
+        (relevant if uncertain or terms & relevant_terms else lower).append(item)
+    for label in ("intrinsic_ambiguity", "context_dependent", "unverified_analyses"):
+        for observation in structural.get(label, []):
+            if isinstance(observation, dict):
+                relevant.append({"observation_type": label, **observation})
+    return relevant, lower
+
+
+def _prosecutor_annotations(chunk: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: item[key]
+            for key in (
+                "annotation_id",
+                "type",
+                "marker",
+                "reference",
+                "source_unit_id",
+                "clean_offset",
+                "value",
+            )
+            if key in item
+        }
+        for item in chunk.get("annotations", [])
+        if isinstance(item, dict)
+    ]
+
+
+def _render_budgeted_prosecutor(
+    chunk: dict[str, Any],
+    witness_a: str,
+    witness_b: str,
+    materials: dict[str, Any],
+    *,
+    max_evidence_requests: int,
+    witness_gate: dict[str, Any] | None,
+    notice: str,
+) -> str:
+    witness_a_section, witness_b_section = _quorum_witness_sections(
+        witness_a, witness_b, witness_gate, prosecutor=True
+    )
+    return f"""You are the adversarial prosecutor for an evidence-first English edition
+of St Jerome's Commentary on Ezekiel. Challenge omissions, additions,
+subject-object reversal, negation, numbers, lexical sense, attachment,
+referents, names, Scripture, textual issues, and unsupported certainty.
+Agreement and fluency are not proof. Do not retranslate, manufacture a second
+witness, or treat pretrained memory as evidence. Request precise evidence when
+an external claim matters.
+{_quorum_notice(witness_gate)}
+
+Return minified VALID JSON with exactly: status
+(no_issue_found|insufficient_basis_to_challenge|requires_evidence|
+grounded_challenge|unresolved), summary, challenges, and evidence_requests.
+Each challenge has latin (an exact short target substring), type, severity,
+witness_target, claim, visible_basis, and requires_external_evidence. Return at
+most 12 distinct challenges and at most {max(0, max_evidence_requests)} evidence
+requests, each with kind, query, and reason.
+Allowed challenge types: negation|subject_object|number|lexical|attachment|
+omission|addition|unsupported_certainty|scripture|proper_name|idiom|
+hebrew_greek|textual|chronology|morphology|source_text|internal_consistency|other.
+Allowed severities: low|medium|high. Allowed witness targets:
+witness_a|witness_b|both|final_question. Allowed evidence kinds:
+jerome_phrase|jerome_lemma|scripture|glossary|morphology|semantic_rag|
+corpus_related|source_edition|chronology|proper_name|web_research.
+
+INPUT BUDGET NOTICE: {notice}
+
+TARGET LATIN:
+<<<
+{chunk['target_latin']}
+
+{witness_a_section}
+
+{witness_b_section}
+
+PRIORITIZED NON-PASS DETERMINISTIC FINDINGS:
+<<<
+{_compact_json(materials['checks'])}
+
+RELEVANT STRUCTURE (target offsets; Latin is not duplicated):
+<<<
+{_compact_json(materials['structural'])}
+
+RELEVANT LEXICAL FLAGS (full morphology remains in immutable audit):
+<<<
+{_compact_json(materials['flags'])}
+
+SOURCE ANNOTATION REFERENCES (source text omitted):
+<<<
+{_compact_json(materials['annotations'])}
+
+OPTIONAL READ-ONLY CONTEXT:
+<<<
+{materials['context_before'] or '[None]'}
+---
+{materials['context_after'] or '[None]'}
+"""
+
+
+def budgeted_prosecutor_prompt(
+    chunk: dict[str, Any],
+    structural: dict[str, Any],
+    lexical: dict[str, Any],
+    checks: dict[str, Any],
+    witness_a: str,
+    witness_b: str,
+    *,
+    max_evidence_requests: int,
+    budget: dict[str, Any],
+    witness_gate: dict[str, Any] | None = None,
+) -> BudgetedProsecutorPrompt:
+    """Build a prioritized bounded request; mandatory overflow returns no prompt."""
+
+    max_prompt_bytes = int(budget.get("max_prompt_utf8_bytes", 44_000))
+    max_request_bytes = int(budget.get("max_request_utf8_bytes", 44_000))
+    max_tokens = int(budget.get("max_estimated_prompt_tokens", 16_000))
+    bytes_per_token = float(budget.get("estimator_bytes_per_token", 2.75))
+    if min(max_prompt_bytes, max_request_bytes, max_tokens) <= 0 or bytes_per_token <= 0:
+        raise ValueError("Prosecutor input budget limits must be positive")
+
+    visible = _quorum_filtered_checks(checks, witness_gate)
+    non_pass = [
+        item for item in visible.get("findings", [])
+        if isinstance(item, dict) and item.get("status") != "pass"
+    ]
+    high = [item for item in non_pass if item.get("severity") == "high"]
+    lower_findings = [item for item in non_pass if item.get("severity") != "high"]
+    terms = _prosecutor_terms(non_pass)
+    all_flags = [item for item in lexical.get("flags", []) if isinstance(item, dict)]
+    mandatory_flags = [
+        item for item in all_flags
+        if item.get("flag_type") == "known_trap"
+        or str(item.get("token") or "").casefold() in terms
+    ]
+    optional_flags = [
+        item for item in all_flags
+        if item not in mandatory_flags
+        and item.get("flag_type") in {"ambiguous_senses", "not_found"}
+    ]
+    relevant_structure, lower_structure = _prosecutor_structure(
+        structural, str(chunk.get("target_latin") or ""), terms
+    )
+    materials: dict[str, Any] = {
+        "checks": [_prosecutor_finding(item) for item in high],
+        # Every directly relevant/known-trap flag is mandatory. If that core
+        # cannot fit, preflight fails closed rather than silently dropping the
+        # 25th high-value lexical record.
+        "flags": [_prosecutor_flag(item) for item in mandatory_flags],
+        "structural": relevant_structure[:16],
+        "annotations": _prosecutor_annotations(chunk)[:16],
+        "context_before": "",
+        "context_after": "",
+    }
+    admitted: list[str] = []
+
+    def render() -> str:
+        notice = ", ".join(admitted) if admitted else "mandatory core only"
+        return _render_budgeted_prosecutor(
+            chunk, witness_a, witness_b, materials,
+            max_evidence_requests=max_evidence_requests,
+            witness_gate=witness_gate,
+            notice=notice,
+        )
+
+    def measure(prompt: str) -> dict[str, int]:
+        return _prompt_measurement(prompt, response_schema={}, bytes_per_token=bytes_per_token)
+
+    def fits(value: dict[str, int]) -> bool:
+        return (
+            value["prompt_utf8_bytes"] <= max_prompt_bytes
+            and value["request_utf8_bytes"] <= max_request_bytes
+            and value["estimated_prompt_tokens"] <= max_tokens
+        )
+
+    historical = measure(
+        prosecutor_prompt(
+            chunk, structural, lexical, checks, witness_a, witness_b,
+            max_evidence_requests=max_evidence_requests,
+            witness_gate=witness_gate,
+        )
+    )
+    prompt = render()
+    mandatory = measure(prompt)
+    limits = {
+        "max_prompt_utf8_bytes": max_prompt_bytes,
+        "max_request_utf8_bytes": max_request_bytes,
+        "max_estimated_prompt_tokens": max_tokens,
+        "estimator_bytes_per_token": bytes_per_token,
+    }
+    if not fits(mandatory):
+        return BudgetedProsecutorPrompt(
+            prompt=None,
+            receipt={
+                "policy": "prosecutor_input_budget",
+                "policy_version": PROSECUTOR_INPUT_BUDGET_POLICY_VERSION,
+                "limits": limits,
+                "historical_unbounded": historical,
+                "mandatory": mandatory,
+                "final": mandatory,
+                "fits": False,
+                "failure_reason": "Mandatory prosecutor material exceeds the configured safe input budget.",
+            },
+        )
+
+    tiers = [
+        ("non_high_non_pass_findings", "checks", [_prosecutor_finding(item) for item in lower_findings[:12]]),
+        ("ambiguous_or_unresolved_lexical_flags", "flags", [_prosecutor_flag(item) for item in optional_flags[:24]]),
+        ("remaining_compact_structural_relationships", "structural", lower_structure[:12]),
+    ]
+    for name, component, additions in tiers:
+        if not additions:
+            continue
+        original = list(materials[component])
+        materials[component] = original + additions
+        candidate = render()
+        if fits(measure(candidate)):
+            prompt = candidate
+            admitted.append(name)
+        else:
+            materials[component] = original
+
+    before = str(chunk.get("context_before") or "")[-400:]
+    after = str(chunk.get("context_after") or "")[:400]
+    materials["context_before"], materials["context_after"] = before, after
+    candidate = render()
+    if fits(measure(candidate)):
+        prompt = candidate
+        admitted.append("bounded_read_only_context_400_chars_each")
+    else:
+        materials["context_before"] = materials["context_after"] = ""
+        prompt = render()
+
+    final = measure(prompt)
+    supplied_sections = _quorum_witness_sections(
+        witness_a, witness_b, witness_gate, prosecutor=True
+    )
+    witness_a_supplied = "[TEXT WITHHELD" not in supplied_sections[0]
+    witness_b_supplied = "[TEXT WITHHELD" not in supplied_sections[1]
+    component_utf8_bytes = {
+        "target_latin": len(str(chunk.get("target_latin") or "").encode("utf-8")),
+        "witness_a": len(witness_a.encode("utf-8")) if witness_a_supplied else 0,
+        "witness_b": len(witness_b.encode("utf-8")) if witness_b_supplied else 0,
+        "deterministic_findings": len(
+            _compact_json(materials["checks"]).encode("utf-8")
+        ),
+        "structural": len(_compact_json(materials["structural"]).encode("utf-8")),
+        "lexical_flags": len(_compact_json(materials["flags"]).encode("utf-8")),
+        "annotations": len(_compact_json(materials["annotations"]).encode("utf-8")),
+        "context": len(
+            (
+                str(materials["context_before"])
+                + str(materials["context_after"])
+            ).encode("utf-8")
+        ),
+    }
+    component_utf8_bytes["boilerplate_and_section_labels"] = max(
+        0, final["prompt_utf8_bytes"] - sum(component_utf8_bytes.values())
+    )
+    receipt = {
+        "policy": "prosecutor_input_budget",
+        "policy_version": PROSECUTOR_INPUT_BUDGET_POLICY_VERSION,
+        "limits": limits,
+        "historical_unbounded": historical,
+        "mandatory": mandatory,
+        "final": final,
+        "priority_tiers_included": admitted,
+        "component_utf8_bytes": component_utf8_bytes,
+        "included": {
+            "high_findings": len(high),
+            "non_high_findings": max(0, len(materials["checks"]) - len(high)),
+            "lexical_flags": len(materials["flags"]),
+            "structural_records": len(materials["structural"]),
+            "annotations": len(materials["annotations"]),
+            "context_chars": len(materials["context_before"]) + len(materials["context_after"]),
+        },
+        "filtered": {
+            "findings": max(0, len(non_pass) - len(materials["checks"])),
+            "lexical_flags": max(0, len(all_flags) - len(materials["flags"])),
+            "structural_sentence_records": max(0, len(structural.get("sentences", [])) - len([item for item in materials["structural"] if "sentence" in item])),
+            "annotations": max(0, len(chunk.get("annotations", [])) - len(materials["annotations"])),
+            "reason": "Only non-pass, dispute-relevant, ambiguity-bearing, or explicitly bounded components enter the model-facing view.",
+        },
+        "preserved": {
+            "target_latin_chars": len(str(chunk.get("target_latin") or "")),
+            "witness_a_chars_supplied": len(witness_a) if witness_a_supplied else 0,
+            "witness_b_chars_supplied": len(witness_b) if witness_b_supplied else 0,
+            "invalid_witnesses_withheld": list((witness_gate or {}).get("invalid_witnesses") or []) if (witness_gate or {}).get("mode") == "degraded" else [],
+            "high_severity_finding_ids": [
+                item.get("finding_id") or item.get("check") or "deterministic"
+                for item in high
+            ],
+            "known_trap_tokens": [item.get("token") for item in mandatory_flags if item.get("flag_type") == "known_trap"],
+        },
+        "fits": fits(final),
+    }
+    if not receipt["fits"]:
+        receipt["failure_reason"] = "Prioritized prosecutor prompt exceeded its configured safe input budget."
+        return BudgetedProsecutorPrompt(prompt=None, receipt=receipt)
+    return BudgetedProsecutorPrompt(prompt=prompt, receipt=receipt)
+
+
 def grounded_prosecutor_prompt(
     chunk: dict[str, Any], initial: dict[str, Any], evidence: list[dict[str, Any]]
 ) -> str:
@@ -814,6 +1236,7 @@ outranks unsupported claims. Serious issues must not be resolved solely from C
 or D. Do not invent Scripture references, Jerome usage, lexicon facts,
 history, chronology, or citations. Preserve unresolved ambiguity instead of
 forcing a choice. Check target coverage clause by clause.
+A/B evidence must support each cited finding; it never supports another.
 {_quorum_notice(witness_gate)}
 
 Statuses:

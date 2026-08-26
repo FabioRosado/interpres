@@ -17,12 +17,16 @@ grounded model can reason about. A genuine execution exception produces an
 pipeline incomplete; the failed receipt is retained for inspection and retry.
 
 The initial prosecutor is constrained to at most twelve consolidated
-challenges and `evidence.max_requests_per_round` prioritized requests. Its
-persisted structural, lexical, deterministic-check, and annotation inputs are
-serialized losslessly without display whitespace. This keeps large chunks
-inside the configured provider context without omitting evidence. Production
-allows 4,200 prosecutor output tokens so a compliant report has room to close
-its JSON; the lightweight smoke profile remains at 3,200.
+challenges and `evidence.max_requests_per_round` prioritized requests. A hard
+preflight preserves the complete target, quorum-permitted witnesses,
+high-severity findings, related lexical traps, and relevant structural
+relationships first. Structure uses target offsets instead of repeating full
+Latin; pass-like checks and ordinary morphology are excluded. Lower-priority
+components enter only when the 44,000-byte/16,000-estimated-token ceiling still
+fits. The persisted receipt records original/final sizes, per-component UTF-8
+bytes, and included/filtered counts; successful prosecutor-stage inputs retain
+the exact bounded request prompt plus its digest. Mandatory overflow fails
+before a provider call.
 
 ## Jerome concordance and local RAG
 
@@ -39,6 +43,18 @@ TF-IDF index plus truncated SVD/LSA components. The JSON artifact persists the
 vocabulary, weights, components, vectors, source digest, actual Latin, and
 provenance. Search uses a lexical/LSA hybrid score and deterministic tie order.
 Receipts contain retrieved Latin, never only a model-generated summary.
+
+The concordance has a sidecar manifest containing canonical book/unit content
+fingerprints and a concordance-record digest. The retrieval index records both
+its concordance digest and canonical-source digest. Initialization compares
+both against the currently configured source; a mismatch returns
+`stale_evidence` with provenance and no results until the relevant artifact is
+rebuilt. Timestamps and filenames are never sufficient freshness evidence.
+
+Positive support is claim-specific. A high-severity finding must independently
+match a non-pass deterministic finding or cite a positive receipt whose request
+is relevant to that finding. A model-supplied Grade A label and a successful
+receipt for another issue provide no support.
 
 ## Scripture and English comparisons
 
