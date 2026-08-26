@@ -11,7 +11,7 @@ from glossary import MorphologicalCandidate, Sense, WordAnalysis
 
 from jerome_pipeline.cache import canonical_digest, stage_record, utc_now
 from jerome_pipeline.config import PipelineConfig, load_config
-from jerome_pipeline.evidence import build_concordance
+from jerome_pipeline.evidence import build_concordance, build_retrieval_index
 from jerome_pipeline.pipeline import EvidenceFirstPipeline
 from jerome_pipeline.prompts import (
     adjudicator_prompt,
@@ -715,6 +715,9 @@ class PipelineVerticalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(Path(directory) / "missing.jsonl")
             data["prosecutor_input_budget"] = {
@@ -1012,6 +1015,9 @@ class PipelineVerticalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(Path(directory) / "missing.jsonl")
             config = PipelineConfig(path=base.path, root=base.root, data=data)
@@ -1107,6 +1113,9 @@ class PipelineVerticalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(Path(directory) / "missing.jsonl")
             data["adjudicator_input_budget"] = {
@@ -1138,6 +1147,9 @@ class PipelineVerticalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(Path(directory) / "missing-concordance.jsonl")
             config = PipelineConfig(path=base.path, root=base.root, data=data)
@@ -1238,6 +1250,9 @@ class PipelineVerticalTest(unittest.TestCase):
             with self.subTest(quorum=expected_quorum), tempfile.TemporaryDirectory() as directory:
                 base = load_config()
                 data = copy.deepcopy(base.data)
+                data.setdefault("evidence", {})
+                data["evidence"]["prosecutor_research_rounds"] = 0
+                data["evidence"]["adjudicator_research_rounds"] = 0
                 data["paths"]["cache"] = str(Path(directory) / "cache")
                 data["paths"]["concordance"] = str(
                     Path(directory) / "missing.jsonl"
@@ -1557,6 +1572,9 @@ class PipelineVerticalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(
                 Path(directory) / "missing-concordance.jsonl"
@@ -1630,6 +1648,7 @@ class PipelineVerticalTest(unittest.TestCase):
             data["paths"]["artifacts"] = str(Path(directory) / "artifacts")
             config = PipelineConfig(path=base.path, root=base.root, data=data)
             build_concordance(config, books=[1], include_lemmas=False)
+            build_retrieval_index(config)
             provider = EvidenceRequestingProvider()
             pipeline = EvidenceFirstPipeline(
                 config,
@@ -1690,7 +1709,9 @@ class PipelineVerticalTest(unittest.TestCase):
             data["paths"]["concordance"] = str(
                 Path(directory) / "missing-concordance.jsonl"
             )
+            data.setdefault("evidence", {})
             data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             config = PipelineConfig(path=base.path, root=base.root, data=data)
             provider = EvidenceRequestingProvider()
             pipeline = EvidenceFirstPipeline(
@@ -1714,14 +1735,23 @@ class PipelineVerticalTest(unittest.TestCase):
             base = load_config()
             data = copy.deepcopy(base.data)
             data["paths"]["cache"] = str(Path(directory) / "cache")
-            data["paths"]["concordance"] = str(
-                Path(directory) / "missing-concordance.jsonl"
+            concordance = Path(directory) / "concordance.jsonl"
+            data["paths"]["concordance"] = str(concordance)
+            data["source"]["books"] = {"1": str(Path(directory) / "book1.txt")}
+            data["paths"]["artifacts"] = str(Path(directory) / "artifacts")
+            # Write minimal source for concordance building
+            (Path(directory) / "book1.txt").write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nnon venit.\n",
+                encoding="utf-8",
             )
             config = PipelineConfig(path=base.path, root=base.root, data=data)
+            build_concordance(config, books=[1], include_lemmas=False)
+            build_retrieval_index(config)
+            provider = EvidenceRequestingProvider()
             pipeline = EvidenceFirstPipeline(
                 config,
                 lexicon=FakeLexicon(),
-                provider=EvidenceRequestingProvider(),
+                provider=provider,
             )
             pipeline.evidence.concordance = ExplodingConcordance()  # type: ignore[assignment]
             result = pipeline.run_chunk(
@@ -1744,6 +1774,9 @@ class PipelineVerticalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(Path(directory) / "missing.jsonl")
             config = PipelineConfig(path=base.path, root=base.root, data=data)

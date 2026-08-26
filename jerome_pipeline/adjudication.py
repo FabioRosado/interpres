@@ -67,24 +67,22 @@ def _receipt_relevance(receipt: dict[str, Any], claim: str) -> dict[str, Any]:
 
 
 def _deterministic_support(
-    claim: str, deterministic_findings: list[dict[str, Any]]
+    claim: str, deterministic_findings: list[dict[str, Any]], evidence_ids: list[str] | None = None
 ) -> list[str]:
-    claim_terms = _terms(claim)
+    """Return deterministic finding IDs that explicitly support a claim.
+
+    Grade A claims must cite deterministic finding IDs in evidence_ids.
+    Keyword overlap is NOT sufficient - explicit provenance required.
+    """
+    evidence_ids = [str(e) for e in evidence_ids] if evidence_ids else []
     supported: list[str] = []
     for item in deterministic_findings:
         if not isinstance(item, dict) or item.get("status") == "pass":
             continue
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-        phrases = [
-            evidence.get("source_phrase"),
-            evidence.get("matched_wrong_rendering"),
-            item.get("message"),
-        ]
-        for mismatch in evidence.get("curated_mismatches", []):
-            if isinstance(mismatch, dict):
-                phrases.extend((mismatch.get("source_form"), mismatch.get("expected")))
-        if claim_terms & _terms(" ".join(str(value or "") for value in phrases)):
-            supported.append(str(item.get("finding_id") or item.get("check") or "deterministic"))
+        # Deterministic findings are identified by check name or finding_id
+        finding_id = str(item.get("finding_id") or item.get("check") or "")
+        if finding_id and finding_id in evidence_ids:
+            supported.append(finding_id)
     return sorted(set(supported))
 
 
@@ -177,7 +175,7 @@ def assess_adjudication_evidence(
             require_receipt=grade == "B",
         )
         deterministic_ids = _deterministic_support(
-            str(item.get("claim") or ""), deterministic_findings
+            str(item.get("claim") or ""), deterministic_findings, item.get("evidence_ids")
         ) if grade == "A" else []
         supported = bool(deterministic_ids) if grade == "A" else bool(ids) and not invalid
         basis_support[index] = {
@@ -204,7 +202,7 @@ def assess_adjudication_evidence(
             claim=claim,
             require_receipt=False,
         )
-        deterministic_ids = _deterministic_support(claim, deterministic_findings)
+        deterministic_ids = _deterministic_support(claim, deterministic_findings, ids)
         receipt_supported = bool(ids) and not invalid
         finding_support[index] = receipt_supported or bool(deterministic_ids)
         finding_support_detail[index] = {

@@ -16,6 +16,9 @@ from jerome_pipeline.schemas import (
     validate_adjudication,
     validate_evidence_request,
     validate_prosecutor,
+    MAX_PROSECUTOR_CHALLENGES,
+    PROSECUTOR_CHALLENGE_TYPES,
+    PROSECUTOR_WITNESS_TARGETS,
 )
 
 
@@ -369,6 +372,141 @@ class SchemaTest(unittest.TestCase):
         too_many_verbs["sentences"][0]["verbs"] *= 7
         with self.assertRaisesRegex(SchemaValidationError, "maximum is 6"):
             expand_structural_wire(too_many_verbs, target)
+
+    def _base_prosecutor(self) -> dict[str, Any]:
+        return {
+            "status": "grounded_challenge",
+            "summary": "Test prosecutor response.",
+            "challenges": [
+                {
+                    "latin": "non venit",
+                    "type": "negation",
+                    "severity": "medium",
+                    "witness_target": "both",
+                    "claim": "Negation may be misrepresented.",
+                    "visible_basis": "Both witnesses show non.",
+                    "requires_external_evidence": True,
+                }
+            ],
+            "evidence_requests": [],
+        }
+
+    def test_prosecutor_exactly_12_challenges_valid(self):
+        base = self._base_prosecutor()
+        base["challenges"] = [
+            {
+                "latin": f"test {i}",
+                "type": "negation",
+                "severity": "low",
+                "witness_target": "both",
+                "claim": f"Challenge {i}.",
+                "visible_basis": "Test basis.",
+                "requires_external_evidence": False,
+            }
+            for i in range(12)
+        ]
+        validate_prosecutor(base)
+
+    def test_prosecutor_13_challenges_invalid(self):
+        base = self._base_prosecutor()
+        base["challenges"] = [
+            {
+                "latin": f"test {i}",
+                "type": "negation",
+                "severity": "low",
+                "witness_target": "both",
+                "claim": f"Challenge {i}.",
+                "visible_basis": "Test basis.",
+                "requires_external_evidence": False,
+            }
+            for i in range(13)
+        ]
+        with self.assertRaisesRegex(SchemaValidationError, "maximum is 12"):
+            validate_prosecutor(base)
+
+    def test_prosecutor_zero_challenges_valid(self):
+        base = self._base_prosecutor()
+        base["status"] = "no_issue_found"
+        base["challenges"] = []
+        validate_prosecutor(base)
+
+    def test_prosecutor_zero_challenges_invalid_for_grounded_challenge(self):
+        base = self._base_prosecutor()
+        base["challenges"] = []
+        with self.assertRaisesRegex(SchemaValidationError, "at least one precise challenge"):
+            validate_prosecutor(base)
+
+    def test_prosecutor_unsupported_challenge_type_invalid(self):
+        base = self._base_prosecutor()
+        base["challenges"][0]["type"] = "unsupported_type"
+        with self.assertRaisesRegex(SchemaValidationError, "unsupported"):
+            validate_prosecutor(base)
+
+    def test_prosecutor_allowed_challenge_types_valid(self):
+        for challenge_type in PROSECUTOR_CHALLENGE_TYPES:
+            base = self._base_prosecutor()
+            base["challenges"][0]["type"] = challenge_type
+            validate_prosecutor(base)
+
+    def test_prosecutor_witness_target_invalid_in_single_valid_b(self):
+        base = self._base_prosecutor()
+        gate = {
+            "quorum": "single_valid_b",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_b"],
+            "invalid_witnesses": ["witness_a"],
+        }
+        base["challenges"][0]["witness_target"] = "witness_a"
+        with self.assertRaisesRegex(SchemaValidationError, "not permitted by the current witness quorum"):
+            validate_prosecutor(base, witness_gate=gate)
+
+    def test_prosecutor_witness_target_invalid_in_single_valid_a(self):
+        base = self._base_prosecutor()
+        gate = {
+            "quorum": "single_valid_a",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_a"],
+            "invalid_witnesses": ["witness_b"],
+        }
+        base["challenges"][0]["witness_target"] = "witness_b"
+        with self.assertRaisesRegex(SchemaValidationError, "not permitted by the current witness quorum"):
+            validate_prosecutor(base, witness_gate=gate)
+
+    def test_prosecutor_witness_target_valid_in_both_valid(self):
+        base = self._base_prosecutor()
+        gate = {
+            "quorum": "both_valid",
+            "mode": "normal",
+            "valid_witnesses": ["witness_a", "witness_b"],
+            "invalid_witnesses": [],
+        }
+        for target in ("witness_a", "witness_b", "both", "final_question"):
+            base["challenges"][0]["witness_target"] = target
+            validate_prosecutor(base, witness_gate=gate)
+
+    def test_prosecutor_witness_target_valid_in_single_valid_b(self):
+        base = self._base_prosecutor()
+        gate = {
+            "quorum": "single_valid_b",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_b"],
+            "invalid_witnesses": ["witness_a"],
+        }
+        for target in ("witness_b", "both", "final_question"):
+            base["challenges"][0]["witness_target"] = target
+            validate_prosecutor(base, witness_gate=gate)
+
+    def test_prosecutor_witness_target_valid_in_single_valid_a(self):
+        base = self._base_prosecutor()
+        gate = {
+            "quorum": "single_valid_a",
+            "mode": "degraded",
+            "valid_witnesses": ["witness_a"],
+            "invalid_witnesses": ["witness_b"],
+        }
+        for target in ("witness_a", "both", "final_question"):
+            base["challenges"][0]["witness_target"] = target
+            validate_prosecutor(base, witness_gate=gate)
 
 
 if __name__ == "__main__":

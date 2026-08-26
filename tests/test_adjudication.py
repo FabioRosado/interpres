@@ -99,7 +99,7 @@ class AdjudicationEvidencePolicyTest(unittest.TestCase):
                     "severity": "high",
                     "latin": "electri",
                     "resolution": "Use electrum for electri.",
-                    "evidence_ids": [],
+                    "evidence_ids": ["det-electri"],
                 },
                 {
                     "severity": "high",
@@ -203,6 +203,186 @@ class AdjudicationEvidencePolicyTest(unittest.TestCase):
             result["issues"][0]["invalid_receipts"][0]["status"],
             "found",
         )
+
+    def test_grade_a_requires_explicit_deterministic_finding_reference(self):
+        """Grade A decision_basis must cite deterministic finding_id in evidence_ids."""
+        result = assess_adjudication_evidence(
+            {
+                "coverage": {"applied_edits": []},
+                "decision_basis": [
+                    {
+                        "grade": "A",
+                        "claim": "electri is a material term.",
+                        "evidence_ids": [],
+                    }
+                ],
+                "findings": [],
+            },
+            [],
+            deterministic_findings=[
+                {
+                    "finding_id": "det-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "electri was rendered as lightning",
+                    "evidence": {"source_phrase": "electri", "expected": "electrum"},
+                }
+            ],
+        )
+        # No explicit reference -> unsupported
+        self.assertFalse(result["basis_support"][0]["supported"])
+        self.assertEqual(result["basis_support"][0]["deterministic_finding_ids"], [])
+
+    def test_grade_a_explicit_deterministic_reference_supported(self):
+        """Grade A with explicit deterministic finding_id in evidence_ids is supported."""
+        result = assess_adjudication_evidence(
+            {
+                "coverage": {"applied_edits": []},
+                "decision_basis": [
+                    {
+                        "grade": "A",
+                        "claim": "electri is a material term.",
+                        "evidence_ids": ["det-electri"],
+                    }
+                ],
+                "findings": [],
+            },
+            [],
+            deterministic_findings=[
+                {
+                    "finding_id": "det-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "electri was rendered as lightning",
+                    "evidence": {"source_phrase": "electri", "expected": "electrum"},
+                }
+            ],
+        )
+        self.assertTrue(result["basis_support"][0]["supported"])
+        self.assertEqual(result["basis_support"][0]["deterministic_finding_ids"], ["det-electri"])
+
+    def test_grade_a_nonexistent_finding_id_not_supported(self):
+        """Grade A referencing nonexistent finding_id is not supported."""
+        result = assess_adjudication_evidence(
+            {
+                "coverage": {"applied_edits": []},
+                "decision_basis": [
+                    {
+                        "grade": "A",
+                        "claim": "electri is a material term.",
+                        "evidence_ids": ["det-nonexistent"],
+                    }
+                ],
+                "findings": [],
+            },
+            [],
+            deterministic_findings=[
+                {
+                    "finding_id": "det-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "electri was rendered as lightning",
+                    "evidence": {"source_phrase": "electri", "expected": "electrum"},
+                }
+            ],
+        )
+        self.assertFalse(result["basis_support"][0]["supported"])
+        self.assertEqual(result["basis_support"][0]["deterministic_finding_ids"], [])
+
+    def test_grade_a_keyword_overlap_without_explicit_id_not_supported(self):
+        """Keyword overlap without explicit finding_id must not support Grade A."""
+        result = assess_adjudication_evidence(
+            {
+                "coverage": {"applied_edits": []},
+                "decision_basis": [
+                    {
+                        "grade": "A",
+                        "claim": "The electri term is wrongly translated as lightning.",
+                        "evidence_ids": [],
+                    }
+                ],
+                "findings": [],
+            },
+            [],
+            deterministic_findings=[
+                {
+                    "finding_id": "det-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "electri was rendered as lightning",
+                    "evidence": {"source_phrase": "electri", "expected": "electrum"},
+                }
+            ],
+        )
+        # Claim contains "electri" "lightning" keywords matching deterministic finding
+        # But no explicit evidence_ids -> must NOT be supported
+        self.assertFalse(result["basis_support"][0]["supported"])
+        self.assertEqual(result["basis_support"][0]["deterministic_finding_ids"], [])
+
+    def test_finding_explicit_deterministic_reference_supported(self):
+        """Adjudicator finding with explicit deterministic finding_id is supported."""
+        result = assess_adjudication_evidence(
+            {
+                "coverage": {"applied_edits": []},
+                "decision_basis": [],
+                "findings": [
+                    {
+                        "severity": "high",
+                        "latin": "electri",
+                        "resolution": "Use electrum.",
+                        "evidence_ids": ["det-electri"],
+                    }
+                ],
+            },
+            [],
+            deterministic_findings=[
+                {
+                    "finding_id": "det-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "electri was rendered as lightning",
+                    "evidence": {"source_phrase": "electri", "expected": "electrum"},
+                }
+            ],
+        )
+        self.assertTrue(result["finding_support"][0])
+        self.assertEqual(result["finding_support_detail"][0]["deterministic_finding_ids"], ["det-electri"])
+
+    def test_finding_unrelated_deterministic_not_supported(self):
+        """Finding with evidence_ids referencing nonexistent deterministic finding is not supported."""
+        result = assess_adjudication_evidence(
+            {
+                "coverage": {"applied_edits": []},
+                "decision_basis": [],
+                "findings": [
+                    {
+                        "severity": "high",
+                        "latin": "Matthaei",
+                        "resolution": "Fix name.",
+                        "evidence_ids": ["det-nonexistent"],
+                    }
+                ],
+            },
+            [],
+            deterministic_findings=[
+                {
+                    "finding_id": "det-electri",
+                    "check": "known_translation_trap",
+                    "status": "warning",
+                    "severity": "high",
+                    "message": "electri was rendered as lightning",
+                    "evidence": {"source_phrase": "electri", "expected": "electrum"},
+                }
+            ],
+        )
+        # Citing nonexistent finding_id -> not supported
+        self.assertFalse(result["finding_support"][0])
+        self.assertEqual(result["finding_support_detail"][0]["deterministic_finding_ids"], [])
 
 
 if __name__ == "__main__":

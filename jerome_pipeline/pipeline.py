@@ -22,7 +22,7 @@ from .checks import (
     run_final_draft_checks,
 )
 from .config import ModelSpec, PipelineConfig
-from .evidence import EvidenceService
+from .evidence import EvidenceService, canonical_source_manifest
 from .editorial import EditorialMemoryIndex
 from .prompts import (
     ADJUDICATOR_INPUT_BUDGET_POLICY_VERSION,
@@ -300,10 +300,32 @@ class EvidenceFirstPipeline:
                     "independently cached round"
                 )
             self.research_round_limits[role] = rounds
-        self.evidence = EvidenceService.from_config(config, self.lexicon)
+        self._evidence: EvidenceService | None = None
         self.editorial_memory = EditorialMemoryIndex(
             config.path_value("editorial_reviews")
         )
+
+    @property
+    def evidence(self) -> EvidenceService:
+        if self._evidence is None:
+            # Only require fresh evidence when research rounds are enabled.
+            # If all research rounds are 0, create a minimal service for cache identity.
+            if any(self.research_round_limits.values()):
+                self._evidence = EvidenceService.from_config(self.config, self.lexicon)
+            else:
+                # Research disabled: evidence service not needed for model calls.
+                # Provide a minimal service with identity for cache invalidation.
+                self._evidence = EvidenceService(
+                    self.config,
+                    lexicon=self.lexicon,
+                    concordance=None,
+                    scripture=None,
+                    retrieval=None,
+                    authorities={},
+                    canonical_manifest=canonical_source_manifest(self.config),
+                    retrieval_freshness={"fresh": False, "status": "unavailable", "reasons": ["research disabled"]},
+                )
+        return self._evidence
 
     def _model(self, role: str) -> ModelSpec:
         return self.config.model(role, profile=self.model_profile)
@@ -1671,7 +1693,9 @@ class EvidenceFirstPipeline:
                         raise ProsecutorInputBudgetError(budgeted_prompt.receipt)
                     output, raw, actual_model, attempts, provenance = (
                         self._structured_call(
-                            spec, budgeted_prompt.prompt, validate_prosecutor
+                            spec,
+                            budgeted_prompt.prompt,
+                            lambda value: validate_prosecutor(value, witness_gate=witness_gate),
                         )
                     )
                     provenance.append(
@@ -1789,7 +1813,11 @@ class EvidenceFirstPipeline:
                         spec = self._model("prosecutor")
                         prompt = grounded_prosecutor_prompt(chunk, initial, prosecutor_evidence)
                         prompt_digest = self._prompt_digest(prompt)
-                        operation = lambda: self._structured_call(spec, prompt, validate_prosecutor)
+                        operation = lambda: self._structured_call(
+                            spec,
+                            prompt,
+                            lambda value: validate_prosecutor(value, witness_gate=witness_gate),
+                        )
                 result = self._stage(
                     stage="prosecutor_grounded",
                     chunk=chunk,

@@ -34,6 +34,31 @@ EVIDENCE_KINDS = (
     "web_research",
 )
 
+MAX_PROSECUTOR_CHALLENGES = 12
+
+PROSECUTOR_CHALLENGE_TYPES = {
+    "negation",
+    "subject_object",
+    "number",
+    "lexical",
+    "attachment",
+    "omission",
+    "addition",
+    "unsupported_certainty",
+    "scripture",
+    "proper_name",
+    "idiom",
+    "hebrew_greek",
+    "textual",
+    "chronology",
+    "morphology",
+    "source_text",
+    "internal_consistency",
+    "other",
+}
+
+PROSECUTOR_WITNESS_TARGETS = {"witness_a", "witness_b", "both", "final_question"}
+
 
 def parse_json_response(text: str) -> dict[str, Any]:
     value = text.strip()
@@ -454,12 +479,18 @@ def expand_structural_wire(
     return validate_structural(canonical)
 
 
-def validate_prosecutor(value: dict[str, Any]) -> dict[str, Any]:
+def validate_prosecutor(
+    value: dict[str, Any], *, witness_gate: dict[str, Any] | None = None
+) -> dict[str, Any]:
     _require(value, {"status", "summary", "challenges", "evidence_requests"}, "prosecutor")
     if value["status"] not in PROSECUTOR_STATUSES:
         raise SchemaValidationError(f"Invalid prosecutor status: {value['status']!r}")
     if not isinstance(value["challenges"], list):
         raise SchemaValidationError("prosecutor.challenges must be a list")
+    if len(value["challenges"]) > MAX_PROSECUTOR_CHALLENGES:
+        raise SchemaValidationError(
+            f"prosecutor.challenges has {len(value['challenges'])} entries; maximum is {MAX_PROSECUTOR_CHALLENGES}"
+        )
     if not isinstance(value["evidence_requests"], list):
         raise SchemaValidationError("prosecutor.evidence_requests must be a list")
     if value["status"] == "grounded_challenge" and not value["challenges"]:
@@ -470,6 +501,14 @@ def validate_prosecutor(value: dict[str, Any]) -> dict[str, Any]:
         raise SchemaValidationError(
             "requires_evidence status requires at least one evidence request"
         )
+    allowed_targets = set(PROSECUTOR_WITNESS_TARGETS)
+    if witness_gate is not None:
+        valid_witnesses = set(witness_gate.get("valid_witnesses") or [])
+        if valid_witnesses:
+            if "witness_a" not in valid_witnesses:
+                allowed_targets.discard("witness_a")
+            if "witness_b" not in valid_witnesses:
+                allowed_targets.discard("witness_b")
     for index, challenge in enumerate(value["challenges"]):
         if not isinstance(challenge, dict):
             raise SchemaValidationError(f"prosecutor challenge {index} must be an object")
@@ -478,8 +517,16 @@ def validate_prosecutor(value: dict[str, Any]) -> dict[str, Any]:
             {"latin", "type", "severity", "witness_target", "claim", "visible_basis", "requires_external_evidence"},
             f"prosecutor challenge {index}",
         )
+        if challenge["type"] not in PROSECUTOR_CHALLENGE_TYPES:
+            raise SchemaValidationError(
+                f"prosecutor challenge {index}.type is unsupported: {challenge['type']!r}"
+            )
         if challenge["severity"] not in SEVERITIES:
             raise SchemaValidationError(f"Invalid challenge severity at index {index}")
+        if challenge["witness_target"] not in allowed_targets:
+            raise SchemaValidationError(
+                f"prosecutor challenge {index}.witness_target is not permitted by the current witness quorum: {challenge['witness_target']!r}"
+            )
         if not isinstance(challenge["requires_external_evidence"], bool):
             raise SchemaValidationError(
                 f"challenge {index}.requires_external_evidence must be boolean"

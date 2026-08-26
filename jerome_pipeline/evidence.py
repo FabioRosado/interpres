@@ -839,6 +839,12 @@ class EvidenceService:
             if concordance_path.exists()
             else None
         )
+        if concordance is not None and not concordance.freshness["fresh"]:
+            raise ValueError(
+                "Jerome concordance does not match the configured canonical source; "
+                "rebuild required before running the pipeline. "
+                f"Freshness reasons: {concordance.freshness.get('reasons', ['unknown'])}"
+            )
         retrieval_path = config.path_value("retrieval_index")
         try:
             retrieval = (
@@ -871,6 +877,12 @@ class EvidenceService:
             ),
             "reasons": retrieval_reasons,
         }
+        if retrieval is not None and not retrieval_freshness["fresh"]:
+            raise ValueError(
+                "Local retrieval index does not match the current concordance/canonical source; "
+                "rebuild required before running the pipeline. "
+                f"Freshness reasons: {retrieval_freshness['reasons']}"
+            )
         try:
             scripture = ScriptureCorpus(
                 config.path_value("vulgate"),

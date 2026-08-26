@@ -142,22 +142,10 @@ class EvidenceTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            unit_tampered = EvidenceService.from_config(
-                config, FreshnessLexicon()
-            )
-            self.assertFalse(unit_tampered.concordance.freshness["fresh"])
-            self.assertIn(
-                "concordance unit fingerprints differ from canonical source",
-                unit_tampered.concordance.freshness["reasons"],
-            )
-            self.assertEqual(
-                unit_tampered.execute(
-                    {"kind": "jerome_phrase", "query": "Prima"},
-                    requested_by="test",
-                )["status"],
-                "stale_evidence",
-            )
-            build_concordance(config, books=[1], include_lemmas=False)
+
+            # from_config must fail closed for unit-tampered concordance
+            with self.assertRaisesRegex(ValueError, "concordance does not match the configured canonical source"):
+                EvidenceService.from_config(config, FreshnessLexicon())
 
             # Same filename, changed source content: both persisted artifacts
             # must be refused by content identity rather than timestamps.
@@ -165,36 +153,16 @@ class EvidenceTest(unittest.TestCase):
                 "Header\nLIBER PRIMUS.\n----[page 0001A]----\nAltera sententia manet.\n",
                 encoding="utf-8",
             )
-            stale = EvidenceService.from_config(config, FreshnessLexicon())
-            self.assertFalse(stale.concordance.freshness["fresh"])
-            self.assertEqual(
-                stale.execute(
-                    {"kind": "jerome_phrase", "query": "Prima"},
-                    requested_by="test",
-                )["status"],
-                "stale_evidence",
-            )
-            self.assertEqual(
-                stale.execute(
-                    {"kind": "semantic_rag", "query": "sententia"},
-                    requested_by="test",
-                )["status"],
-                "stale_evidence",
-            )
+            # from_config must fail closed for stale concordance
+            with self.assertRaisesRegex(ValueError, "concordance does not match the configured canonical source"):
+                EvidenceService.from_config(config, FreshnessLexicon())
 
             # Rebuilding only the concordance restores exact retrieval but the
             # old semantic index remains stale until independently rebuilt.
             build_concordance(config, books=[1], include_lemmas=False)
-            half_rebuilt = EvidenceService.from_config(config, FreshnessLexicon())
-            self.assertTrue(half_rebuilt.concordance.freshness["fresh"])
-            self.assertFalse(half_rebuilt.retrieval_freshness["fresh"])
-            self.assertEqual(
-                half_rebuilt.execute(
-                    {"kind": "semantic_rag", "query": "sententia"},
-                    requested_by="test",
-                )["status"],
-                "stale_evidence",
-            )
+            # from_config must fail closed because retrieval index is still stale
+            with self.assertRaisesRegex(ValueError, "retrieval index does not match the current concordance"):
+                EvidenceService.from_config(config, FreshnessLexicon())
             build_retrieval_index(config)
             rebuilt = EvidenceService.from_config(config, FreshnessLexicon())
             self.assertTrue(rebuilt.concordance.freshness["fresh"])
@@ -399,6 +367,70 @@ class EvidenceTest(unittest.TestCase):
         )[0]
         self.assertLessEqual(len(result["odr"]), 100)
         self.assertTrue(result["truncation"]["odr"]["truncated"])
+
+    def test_stale_concordance_fails_closed_in_from_config(self):
+        """Stale concordance must raise at EvidenceService.from_config, not return stale evidence."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "book1.txt"
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nPrima sententia manet.\n",
+                encoding="utf-8",
+            )
+            base = load_config()
+            data = copy.deepcopy(base.data)
+            data["source"]["books"] = {"1": str(source)}
+            data["paths"]["artifacts"] = str(root / "artifacts")
+            data["paths"]["concordance"] = str(root / "concordance.jsonl")
+            data["paths"]["retrieval_index"] = str(root / "retrieval.json")
+            config = PipelineConfig(path=base.path, root=root, data=data)
+
+            # Build fresh concordance
+            build_concordance(config, books=[1], include_lemmas=False)
+
+            # Fresh service works
+            fresh = EvidenceService.from_config(config, FreshnessLexicon())
+            self.assertTrue(fresh.concordance.freshness["fresh"])
+
+            # Tamper source to make concordance stale
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nAltera sententia manet.\n",
+                encoding="utf-8",
+            )
+
+            # from_config must fail closed
+            with self.assertRaisesRegex(ValueError, "concordance does not match the configured canonical source"):
+                EvidenceService.from_config(config, FreshnessLexicon())
+
+    def test_stale_retrieval_index_fails_closed_in_from_config(self):
+        """Stale retrieval index must raise at EvidenceService.from_config."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "book1.txt"
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nPrima sententia manet.\n",
+                encoding="utf-8",
+            )
+            base = load_config()
+            data = copy.deepcopy(base.data)
+            data["source"]["books"] = {"1": str(source)}
+            data["paths"]["artifacts"] = str(root / "artifacts")
+            data["paths"]["concordance"] = str(root / "concordance.jsonl")
+            data["paths"]["retrieval_index"] = str(root / "retrieval.json")
+            config = PipelineConfig(path=base.path, root=root, data=data)
+
+            build_concordance(config, books=[1], include_lemmas=False)
+            build_retrieval_index(config)
+
+            # Tamper source to make retrieval index stale
+            source.write_text(
+                "Header\nLIBER PRIMUS.\n----[page 0001A]----\nAltera sententia manet.\n",
+                encoding="utf-8",
+            )
+
+            # from_config must fail closed
+            with self.assertRaisesRegex(ValueError, "concordance does not match the configured canonical source"):
+                EvidenceService.from_config(config, FreshnessLexicon())
 
 
 if __name__ == "__main__":
