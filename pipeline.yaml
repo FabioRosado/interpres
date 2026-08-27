@@ -189,9 +189,10 @@ adjudicator_input_budget:
   # The live Qwen provider repeatedly stopped evaluating at about 16,386
   # prompt tokens. This conservative estimator and byte ceiling leave margin
   # while preserving the complete Latin and both complete witnesses.
-  max_prompt_utf8_bytes: 45000
-  max_request_utf8_bytes: 52000
-  max_estimated_prompt_tokens: 15000
+  # Increased to accommodate few-shot edit precision examples.
+  max_prompt_utf8_bytes: 55000
+  max_request_utf8_bytes: 62000
+  max_estimated_prompt_tokens: 18000
   estimator_bytes_per_token: 3.0
 
 adjudicator_edit_budget:

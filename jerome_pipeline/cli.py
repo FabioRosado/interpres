@@ -9,7 +9,8 @@ from typing import Any
 from .cache import StageCache, utc_now
 from .challenge import challenge_metrics, load_challenges, run_challenges
 from .config import PipelineConfig, load_config
-from .evidence import build_concordance, build_retrieval_index
+from .evidence import EvidenceService, build_concordance, build_retrieval_index
+from glossary import WhitakersWordsBackend
 from .pipeline import EvidenceFirstPipeline, STAGE_ORDER, write_audit_jsonl
 from .reports import compare_legacy, load_jsonl
 from .source import load_chunks, preprocess_book
@@ -331,6 +332,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command in {"run", "resume"}:
+        # Auto-rebuild stale concordance/retrieval index if needed
+        try:
+            EvidenceService.from_config(config, WhitakersWordsBackend())
+        except ValueError as e:
+            if "stale" in str(e) or "does not match" in str(e):
+                print(f"[auto-rebuild] {e}", flush=True)
+                build_concordance(config, books=[args.book], include_lemmas=False)
+                build_retrieval_index(config)
+                print("[auto-rebuild] Complete", flush=True)
+            else:
+                raise
+
         chunks = _select_chunks(load_chunks(config, args.book), args)
         pipeline = EvidenceFirstPipeline(config, model_profile=args.profile)
         retry = bool(getattr(args, "retry_failed", False) or args.command == "resume")

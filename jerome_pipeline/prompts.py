@@ -715,7 +715,7 @@ Return VALID JSON ONLY:
 }}
 
 OUTPUT BUDGET RULES:
-- Return at most 12 distinct substantive challenges. Consolidate overlapping
+- Return at most 15 distinct substantive challenges. Consolidate overlapping
   lexical, morphology, and attachment allegations instead of repeating them.
 - Return at most {max(0, max_evidence_requests)} evidence requests, ordered by
   which could most materially change the decision. Software cannot execute
@@ -1238,6 +1238,42 @@ history, chronology, or citations. Preserve unresolved ambiguity instead of
 forcing a choice. Check target coverage clause by clause.
 A/B evidence must support each cited finding; it never supports another.
 {_quorum_notice(witness_gate)}
+
+EDIT PRECISION EXAMPLES:
+These examples illustrate the exacting standard required. Study them carefully.
+
+Example 1 — Unique exact span (CORRECT):
+Selected witness: "He did not come. He has not arrived."
+Edit: {{"old": "He did not come.", "new": "He did not arrive.", "reason": "Consistent verb choice.", "evidence_ids": ["ev-1"]}}
+Rationale: "He did not come." occurs exactly once. Clear, unambiguous.
+
+Example 2 — Repeated phrase with disambiguating context (CORRECT):
+Selected witness: "The man saw the light. The light was bright."
+Edit: {{"old": "The man saw the light.", "new": "The man beheld the light.", "reason": "More precise verb.", "evidence_ids": ["ev-2"]}}
+Rationale: "the light" appears twice but "The man saw the light." occurs once. Sufficient context included.
+
+Example 3 — Ambiguous repeated span without disambiguation (INCORRECT — DO NOT DO THIS):
+Selected witness: "light appears. light is good."
+WRONG edit: {{"old": "light", "new": "lux", "reason": "Latin term.", "evidence_ids": []}}
+Rationale: "light" occurs twice (or more). Software will reject. If you cannot include enough context to make the span unique, DO NOT GUESS. Return "human_review" or "unresolved" for that phrase with the exact substring and the specific check a human must perform.
+
+Example 4 — Sequential edits against evolving base (CORRECT):
+Selected witness: "He did not come. He has not arrived."
+Edit 1: {{"old": "He did not come.", "new": "He did not arrive.", "reason": "Consistent verb.", "evidence_ids": ["ev-3"]}}
+Edit 2: {{"old": "He has not arrived.", "new": "He has not come.", "reason": "Second verb aligned.", "evidence_ids": ["ev-4"]}}
+Rationale: After Edit 1, the evolving base is "He did not arrive. He has not arrived." Edit 2's "old" matches the SECOND sentence in that evolving base exactly once. Each old matches the current draft state at its application point.
+
+Example 5 — Sequential edit using stale reference (INCORRECT — DO NOT DO THIS):
+Selected witness: "A B C"
+WRONG edits: [{{"old": "B", "new": "X"}}, {{"old": "C", "new": "Y"}}] where "C" appears twice in original but once in evolving base after first edit.
+Rationale: If "C" appears in original before and after "B", the second edit's "old" must match the evolving base after the first edit, not the original. Verify each "old" against the draft state at its turn.
+
+KEY RULES:
+- Each "old" MUST occur exactly ONCE in the evolving base at its application point.
+- Include enough surrounding text to make the span unique (sentence-level or clause-level).
+- Copy "old" byte-for-byte from the SELECTED witness only.
+- If you cannot construct a unique span for a necessary change, return "human_review" or "unresolved" for that specific phrase with the exact substring and the exact check a human should perform. NEVER guess or use ambiguous spans.
+- Empty edits array means the selected witness needs no change.
 
 Statuses:
 - accepted: a complete best draft with no substantive correction required;

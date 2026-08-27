@@ -391,7 +391,7 @@ class SchemaTest(unittest.TestCase):
             "evidence_requests": [],
         }
 
-    def test_prosecutor_exactly_12_challenges_valid(self):
+    def test_prosecutor_exactly_15_challenges_valid(self):
         base = self._base_prosecutor()
         base["challenges"] = [
             {
@@ -403,11 +403,11 @@ class SchemaTest(unittest.TestCase):
                 "visible_basis": "Test basis.",
                 "requires_external_evidence": False,
             }
-            for i in range(12)
+            for i in range(15)
         ]
         validate_prosecutor(base)
 
-    def test_prosecutor_13_challenges_invalid(self):
+    def test_prosecutor_16_challenges_invalid(self):
         base = self._base_prosecutor()
         base["challenges"] = [
             {
@@ -419,9 +419,9 @@ class SchemaTest(unittest.TestCase):
                 "visible_basis": "Test basis.",
                 "requires_external_evidence": False,
             }
-            for i in range(13)
+            for i in range(16)
         ]
-        with self.assertRaisesRegex(SchemaValidationError, "maximum is 12"):
+        with self.assertRaisesRegex(SchemaValidationError, "maximum is 15"):
             validate_prosecutor(base)
 
     def test_prosecutor_zero_challenges_valid(self):
@@ -507,6 +507,115 @@ class SchemaTest(unittest.TestCase):
         for target in ("witness_a", "both", "final_question"):
             base["challenges"][0]["witness_target"] = target
             validate_prosecutor(base, witness_gate=gate)
+
+    def test_adjudication_repeated_phrase_ambiguous_edit_rejected(self):
+        """Ambiguous repeated-span edits must be rejected; model must use unique spans."""
+        base_witness = "light appears. light is good."
+        decision = {
+            "status": "corrected",
+            "base_witness": "a",
+            "edits": [{"old": "light", "new": "lux", "reason": "Latin term", "evidence_ids": []}],
+            "summary": "Fix term",
+            "coverage": {"all_clauses_accounted_for": True, "omissions_corrected": []},
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        with self.assertRaisesRegex(SchemaValidationError, "must match the evolving base exactly once; found 2"):
+            expand_adjudication_wire(decision, witness_a=base_witness, witness_b="irrelevant", allowed_base_witnesses=["a"])
+
+    def test_adjudication_repeated_phrase_disambiguated_edit_accepted(self):
+        """Disambiguated repeated-span edits (with sufficient context) must be accepted."""
+        base_witness = "The man saw the light. The light was bright."
+        decision = {
+            "status": "corrected",
+            "base_witness": "a",
+            "edits": [{"old": "The man saw the light.", "new": "The man beheld the light.", "reason": "Precise verb", "evidence_ids": []}],
+            "summary": "Fix verb",
+            "coverage": {"all_clauses_accounted_for": True, "omissions_corrected": []},
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        result = expand_adjudication_wire(decision, witness_a=base_witness, witness_b="irrelevant", allowed_base_witnesses=["a"])
+        self.assertEqual(result["final_draft"], "The man beheld the light. The light was bright.")
+        self.assertEqual(len(result["coverage"]["applied_edits"]), 1)
+
+    def test_adjudication_sequential_edits_evolving_base(self):
+        """Sequential edits apply against the evolving base, not the original."""
+        base_witness = "He did not come. He has not arrived."
+        decision = {
+            "status": "corrected",
+            "base_witness": "a",
+            "edits": [
+                {"old": "He did not come.", "new": "He did not arrive.", "reason": "Consistent verb", "evidence_ids": []},
+                {"old": "He has not arrived.", "new": "He has not come.", "reason": "Second verb aligned", "evidence_ids": []},
+            ],
+            "summary": "Align verbs",
+            "coverage": {"all_clauses_accounted_for": True, "omissions_corrected": []},
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        result = expand_adjudication_wire(decision, witness_a=base_witness, witness_b="irrelevant", allowed_base_witnesses=["a"])
+        self.assertEqual(result["final_draft"], "He did not arrive. He has not come.")
+        self.assertEqual(len(result["coverage"]["applied_edits"]), 2)
+        # Verify second edit matched evolving base (after first edit)
+        applied = result["coverage"]["applied_edits"]
+        self.assertEqual(applied[0]["application_order"], 0)
+        self.assertEqual(applied[1]["application_order"], 1)
+
+    def test_adjudication_sequential_edits_stale_reference_rejected(self):
+        """Sequential edits using stale (original) reference must be rejected."""
+        # "C" appears twice in original, but only once in evolving base after first edit
+        base_witness = "A C B C"
+        decision = {
+            "status": "corrected",
+            "base_witness": "a",
+            "edits": [
+                {"old": "B", "new": "X", "reason": "Fix B", "evidence_ids": []},
+                {"old": "C", "new": "Y", "reason": "Fix C", "evidence_ids": []},
+            ],
+            "summary": "Fix",
+            "coverage": {"all_clauses_accounted_for": True, "omissions_corrected": []},
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        # After first edit: "A C X C" -> "C" appears twice (found 2) -> rejected
+        with self.assertRaisesRegex(SchemaValidationError, "must match the evolving base exactly once; found 2"):
+            expand_adjudication_wire(decision, witness_a=base_witness, witness_b="irrelevant", allowed_base_witnesses=["a"])
+
+    def test_adjudication_sequential_edits_unique_context_accepted(self):
+        """Sequential edits with unique context in evolving base are accepted."""
+        base_witness = "A C B D C"
+        decision = {
+            "status": "corrected",
+            "base_witness": "a",
+            "edits": [
+                {"old": "B", "new": "X", "reason": "Fix B", "evidence_ids": []},
+                {"old": "D C", "new": "Y Z", "reason": "Fix D C", "evidence_ids": []},
+            ],
+            "summary": "Fix",
+            "coverage": {"all_clauses_accounted_for": True, "omissions_corrected": []},
+            "findings": [],
+            "unresolved_issues": [],
+            "human_review_requests": [],
+            "evidence_requests": [],
+            "decision_basis": [],
+        }
+        # After first edit: "A C X D C" -> "D C" occurs once
+        result = expand_adjudication_wire(decision, witness_a=base_witness, witness_b="irrelevant", allowed_base_witnesses=["a"])
+        self.assertEqual(result["final_draft"], "A C X Y Z")
+        self.assertEqual(len(result["coverage"]["applied_edits"]), 2)
 
 
 if __name__ == "__main__":

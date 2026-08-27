@@ -934,19 +934,19 @@ class PipelineVerticalTest(unittest.TestCase):
             evidence,
             response_schema=adjudication_schema(),
             budget={
-                "max_prompt_utf8_bytes": 45000,
-                "max_request_utf8_bytes": 52000,
-                "max_estimated_prompt_tokens": 15000,
+                "max_prompt_utf8_bytes": 55000,
+                "max_request_utf8_bytes": 62000,
+                "max_estimated_prompt_tokens": 18000,
                 "estimator_bytes_per_token": 3.0,
             },
         )
         self.assertTrue(result.fits, result.receipt)
         self.assertEqual(
             result.receipt["serialization"],
-            "dense_json",
+            "pretty_json",
             result.receipt,
         )
-        self.assertIn(
+        self.assertNotIn(
             "dense_json_encoding_without_semantic_loss",
             result.receipt["compaction_steps"],
         )
