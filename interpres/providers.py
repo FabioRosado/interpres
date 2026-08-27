@@ -10,7 +10,6 @@ from typing import Any
 
 from .config import ModelSpec, PipelineConfig
 
-
 OPENROUTER_CONTRACT_VERSION = 2
 
 

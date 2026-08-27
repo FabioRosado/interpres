@@ -1,0 +1,203 @@
+pipeline:
+  version: "5.0.0-evidence-first"
+  schema_version: 1
+  prompt_version: "2026-08-25.4"
+
+source:
+  books:
+    "1": "../../book1.txt"
+  metadata:
+    author: "Hieronymus Stridonensis"
+    work: "Commentaria in Ezechielem"
+    corpus: "Patrologia Latina (Corpus 2)"
+    cc_idno: 21347
+    cc_id: "cps_2.HieStr.CoInEz"
+    permalink: "https://mlat.uzh.ch/browser/cps_2.HieStr.CoInEz"
+
+paths:
+  artifacts: "../../artifacts"
+  cache: "../../.cache/jerome"
+  concordance: "../../artifacts/concordance.jsonl"
+  retrieval_index: "../../artifacts/retrieval-index.json"
+  vulgate: "../../data/clementine-vulgate/vul.tsv"
+  vulgate_books: "../../data/clementine-vulgate/scripts/book_metadata.csv"
+  cpdv: "../../data/cpdv"
+  odr: "../../data/odr/verses.jsonl"
+  chronology_authority: "../../data/research/chronology.jsonl"
+  proper_name_authority: "../../data/research/proper-names.jsonl"
+  source_edition_authority: "../../data/research/source-editions.jsonl"
+  editorial_decisions: "../../editorial/decisions.jsonl"
+  human_reviews: "../../editorial/human_reviews.jsonl"
+  editorial_reviews: "../../editorial/reviews"
+  challenge_set: "./challenges/challenge_set.jsonl"
+  challenge_results: "../../artifacts/challenge-results.jsonl"
+
+chunking:
+  target_source_units: 4
+  min_source_units: 3
+  max_source_units: 4
+  max_chars: 6500
+  context_units: 1
+  context_max_chars: 1800
+
+providers:
+  ollama:
+    base_url: "http://127.0.0.1:11434/api/chat"
+    timeout_seconds: 1800
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1/chat/completions"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout_seconds: 1800
+
+models:
+  witness_a:
+    provider: ollama
+    model: "qwen3.5:9b"
+    temperature: 0.1
+    context: 8192
+    max_output_tokens: 1500
+    thinking: false
+    retries: 2
+  witness_b:
+    provider: ollama
+    model: "mistral-small3.2:24b"
+    temperature: 0.1
+    context: 16384
+    max_output_tokens: 1800
+    thinking: false
+    retries: 2
+  structural_parser:
+    provider: ollama
+    model: "qwen3.8:27b"
+    temperature: 0.05
+    context: 32768
+    max_output_tokens: 5200
+    thinking: false
+    retries: 2
+  prosecutor:
+    provider: openrouter
+    model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    temperature: 0.01
+    context: 32768
+    max_output_tokens: 4200
+    thinking: false
+    retries: 1
+    fallback:
+      provider: ollama
+      model: "gemma3:27b"
+      temperature: 0.05
+      context: 32768
+      max_output_tokens: 3200
+      thinking: false
+      retries: 1
+  adjudicator:
+    provider: ollama
+    model: "qwen3.8:27b"
+    temperature: 0.05
+    context: 32768
+    max_output_tokens: 4200
+    thinking: false
+    retries: 2
+  experimental_translategemma:
+    enabled: false
+    provider: ollama
+    model: "translategemma:27b"
+    temperature: 0.1
+    context: 16384
+    max_output_tokens: 1800
+    thinking: false
+    retries: 1
+
+profiles:
+  production:
+    description: "Configured evidence-quality roles; default for real outcomes."
+    models: {}
+  smoke:
+    description: "Fast plumbing/schema checks only; never use results as translation outcomes."
+    models:
+      structural_parser:
+        provider: ollama
+        model: "qwen3.5:9b"
+        temperature: 0.0
+        context: 32768
+        max_output_tokens: 5200
+        thinking: false
+        retries: 0
+      witness_a:
+        provider: ollama
+        model: "qwen3.5:9b"
+        temperature: 0.0
+        context: 8192
+        max_output_tokens: 1500
+        thinking: false
+        retries: 0
+      witness_b:
+        provider: ollama
+        model: "qwen3.5:9b"
+        temperature: 0.0
+        context: 8192
+        max_output_tokens: 1500
+        thinking: false
+        retries: 0
+      prosecutor:
+        provider: ollama
+        model: "qwen3.5:9b"
+        temperature: 0.0
+        context: 32768
+        max_output_tokens: 3200
+        thinking: false
+        retries: 0
+        fallback: null
+      adjudicator:
+        provider: ollama
+        model: "qwen3.5:9b"
+        temperature: 0.0
+        context: 32768
+        max_output_tokens: 4200
+        thinking: false
+        retries: 0
+
+evidence:
+  prosecutor_research_rounds: 1
+  adjudicator_research_rounds: 1
+  max_requests_per_round: 6
+  max_results_per_request: 8
+  snippet_chars: 900
+  morphology_prompt_forms: 100
+  semantic_search_enabled: true
+  external_web_enabled: false
+
+structural_output_budget:
+  large_sentence_threshold: 12
+  large_max_output_tokens: 7200
+
+prosecutor_input_budget:
+  max_prompt_utf8_bytes: 44000
+  max_request_utf8_bytes: 44000
+  max_estimated_prompt_tokens: 16000
+  estimator_bytes_per_token: 2.75
+
+adjudicator_input_budget:
+  max_prompt_utf8_bytes: 55000
+  max_request_utf8_bytes: 62000
+  max_estimated_prompt_tokens: 18000
+  estimator_bytes_per_token: 3.0
+
+adjudicator_edit_budget:
+  max_words_per_edit: 48
+  max_cumulative_words: 96
+  max_base_replacement_ratio: 0.25
+
+retrieval:
+  method: "latin_tfidf_lsa_v1"
+  dimensions: 48
+  min_document_frequency: 1
+
+research_adapters:
+  authority_schema: "jerome-authority-jsonl/v1"
+  odr_schema: "verse-comparison-jsonl/v1"
+
+execution:
+  retry_failed_by_default: false
+  save_raw_responses: true
+  deterministic_temperature: 0.0

@@ -1,7 +1,37 @@
+# Python
 __pycache__/
 *.py[cod]
-.cache/
-artifacts/
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
 .env
 .env.*
-!.env.example
+
+# Data & corpus (NOT redistributable without verification)
+data/
+book1.txt
+*Full corpus*.txt
+
+# Generated artifacts
+artifacts/
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Vendored third-party (removed)
+dependencies/
+
+# Project data (committed under version control)
+# projects/ contains configuration, challenges, and editorial data

@@ -5,19 +5,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jerome_pipeline.config import PipelineConfig, load_config
-from jerome_pipeline.editorial import (
+from interpres.config import PipelineConfig, load_config
+from interpres.editorial import (
     EditorialMemoryIndex,
     EditorialRevisionConflict,
     EditorialRevisionStore,
     text_digest,
 )
-from jerome_pipeline.pipeline import EvidenceFirstPipeline
-from jerome_pipeline.prompts import (
+from interpres.pipeline import EvidenceFirstPipeline
+from interpres.prompts import (
     budgeted_adjudicator_prompt,
     prosecutor_prompt,
 )
-from jerome_pipeline.schemas import adjudication_schema
+from interpres.schemas import adjudication_schema
 from tests.test_pipeline import FakeLexicon, FakeProvider
 
 
@@ -246,9 +246,15 @@ class EditorialPipelineIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = load_config()
             data = copy.deepcopy(base.data)
+            data.setdefault("evidence", {})
+            data["evidence"]["prosecutor_research_rounds"] = 0
+            data["evidence"]["adjudicator_research_rounds"] = 0
             data["paths"]["cache"] = str(Path(directory) / "cache")
             data["paths"]["concordance"] = str(
                 Path(directory) / "missing-concordance.jsonl"
+            )
+            data["paths"]["retrieval_index"] = str(
+                Path(directory) / "missing-retrieval-index.json"
             )
             data["paths"]["editorial_reviews"] = str(
                 Path(directory) / "editorial-reviews"

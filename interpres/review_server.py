@@ -15,7 +15,6 @@ from .config import PipelineConfig
 from .editorial import EditorialRevisionConflict, EditorialRevisionError
 from .review import ReviewRepository
 
-
 STATIC_ROOT = Path(__file__).with_name("reviewer_ui")
 
 

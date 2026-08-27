@@ -4,7 +4,6 @@ import re
 from difflib import SequenceMatcher
 from typing import Any, Protocol
 
-
 WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
 ARABIC_RE = re.compile(r"(?<!\w)\d+(?!\w)")
 ROMAN_RE = re.compile(r"(?<![A-Za-z])[IVXLCDM]{2,}(?![A-Za-z])")

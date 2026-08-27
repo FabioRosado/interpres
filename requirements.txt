@@ -1,0 +1,14 @@
+# Runtime dependencies for interpres
+# Generated from pyproject.toml [project.dependencies]
+pyyaml>=6.0
+requests>=2.31
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+
+# Optional: whitakers-words (required for morphology/lexical analysis)
+# Install with: pip install "whitakers-words @ git+https://github.com/blagae/whitakers_words.git"
+# Or: pip install -e .[whitakers]
+# Note: The git dependency has a known build issue on Windows.
+# For development, the local copy in dependencies/whitakers_words can be used:
+# pip install -e dependencies/whitakers_words

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-from jerome_pipeline.cli import main
+from interpres.cli import main
 
 
 def _legacy_arguments(argv: list[str]) -> list[str]:

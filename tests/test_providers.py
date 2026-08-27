@@ -4,8 +4,8 @@ import unittest
 from os import environ
 from unittest.mock import patch
 
-from jerome_pipeline.config import load_config
-from jerome_pipeline.providers import ModelProvider
+from interpres.config import load_config
+from interpres.providers import ModelProvider
 
 
 class ProviderStructuredOutputTest(unittest.TestCase):

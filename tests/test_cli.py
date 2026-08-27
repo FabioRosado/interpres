@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jerome_pipeline.cache import StageCache, stage_record
-from jerome_pipeline.cli import _failed_chunk_jobs, build_parser
-from jerome_pipeline.config import PipelineConfig, load_config
+from interpres.cache import StageCache, stage_record
+from interpres.cli import _failed_chunk_jobs, build_parser
+from interpres.config import PipelineConfig, load_config
 
 
 class FailedChunkCommandTest(unittest.TestCase):
@@ -145,10 +145,13 @@ class FailedChunkCommandTest(unittest.TestCase):
         reference = (
             Path(__file__).parents[1] / "docs" / "command-reference.md"
         ).read_text(encoding="utf-8")
-        for command in commands - {"challenge"}:
+        for command in commands - {"challenge", "project", "doctor"}:
             self.assertIn(f"### `{command}`", reference)
         for challenge_command in ("inspect", "run", "report"):
             self.assertIn(f"### `challenge {challenge_command}`", reference)
+        for project_command in ("list", "show"):
+            self.assertIn(f"### `project {project_command}`", reference)
+        self.assertIn("### `doctor`", reference)
 
 
 if __name__ == "__main__":

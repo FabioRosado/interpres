@@ -1,689 +1,353 @@
-# St Jerome evidence-first translation pipeline
+# Interpres
 
-This repository refactors the v4/v4.1 *Commentaria in Ezechielem* workflow
-into an auditable Latin-to-English pipeline. Its governing rule is:
+> **Models may propose. Evidence must verify. Agreement is not proof.**
 
-> Models may propose; evidence must verify. Agreement is not proof.
+An **evidence-first, human-in-the-loop translation pipeline** for historical texts. Interpres orchestrates multiple LLM "witnesses" through deterministic validation, bounded evidence retrieval, and explicit human review gates — producing auditable drafts where dangerous uncertainty is difficult to hide.
 
-The system aims to produce a strong draft while making dangerous uncertainty
-difficult to hide. `unresolved` and `human_review` are successful, honest
-outcomes when the available evidence cannot support approval.
+**Status**: Experimental. Currently validated on St Jerome's *Commentaria in Ezechielem* (Book I).
 
-The required baseline inspection and exact old-to-new stage map are in
-[`docs/v4-migration-map.md`](docs/v4-migration-map.md).
+---
 
-## Architecture
+## What is Interpres?
 
-```text
-Corpus source -> canonical page units -> 3-4-unit processing chunks
-  -> deterministic morphology + compact glossary flags
-  -> blind structural parse
-  -> independent Witness A
-  -> independent Witness B
-  -> deterministic witness validation + explicit quorum gate
-       both_valid -> normal two-witness path
-       single_valid_a|b -> degraded, sole valid base, mandatory human review
-       both_invalid -> stop before prosecution
-  -> deterministic checks
-  -> prosecutor_initial (every chunk)
-  -> research_prosecutor (bounded deterministic evidence receipts)
-  -> prosecutor_grounded
-  -> adjudicator_initial
-  -> research_adjudicator (optional bounded targeted receipts)
-  -> adjudicator
-  -> accepted | corrected | unresolved | human_review
-  -> audit JSONL with immutable stage provenance
-```
+Interpres is a **scholarly translation assistant**, not an autonomous translator. It:
 
-Witnesses receive only the complete target Latin inside one closed target
-element. Repeated live runs showed that both models sometimes translated Latin
-which was explicitly labelled read-only, so auxiliary context is retained in
-the audit but withheld from witness requests. Matched-seed Chunk 5 controls then
-showed that provider-enforced JSON caused a decisive parenthetical omission even
-with a minimal one-string schema, while the equivalent plain response retained
-it. Production witness contract v4 therefore preserves the complete plain-text
-response instead of requesting JSON or per-unit serialization. Witnesses do
-not receive morphology, structural output, each other, the prosecutor,
-adjudication, external English, or reviewed translations. The structural
-parser runs before witnesses and never receives English witnesses.
+- Takes Latin historical text as input
+- Runs multiple AI models independently to propose English translations
+- Validates every proposal against deterministic rules and retrieved evidence
+- Flags uncertainty explicitly — `unresolved` and `human_review` are **successful outcomes**
+- Produces an immutable audit trail for every decision
 
-Witness responses are untrusted proposals. Before either can reach prosecution
-or be selected as an adjudicator base, a local gate verifies the exact stored
-target, immutable raw response, provider stop/token receipt, versioned response
-contract identity, commentary/fences, suspicious source copying, whole-target
-curated proper-name multiplicity, and global coverage-length signals. The raw
-text is never cleaned by stripping known preambles. Source-unit mappings are
-recorded as unavailable rather than fabricated and are non-blocking under v4;
-exact input identity plus deterministic whole-target signals form the coverage
-receipt. A
-conservative context-leakage signal also compares
-the proposal with target-exclusive names and literal spans from the read-only
-context. Before a provider is contacted, a deterministic completion-budget
-preflight reserves space for translation, inline uncertainty, and a closing
-margin; an impossible request fails locally with an auditable
-receipt. The derived quorum is persisted as `both_valid`, `single_valid_a`,
-`single_valid_b`, or `both_invalid`. A single-valid chunk continues in sticky
-degraded mode: only the valid proposal is supplied as a selectable base, the
-invalid output remains an immutable non-authoritative review clue, and
-automatic acceptance is disabled. Two invalid witnesses fail closed before
-prosecution while preserving both raw responses.
+Think of it as a **structured workspace for translation review**, where AI suggestions are rigorously checked before any human sees them.
 
-The cached chunk 4/5 investigation and exact provider receipts are recorded in
-[`docs/witness-boundary-diagnosis.md`](docs/witness-boundary-diagnosis.md).
-Request/response measurements and the downstream granularity assessment are in
-[`docs/witness-budget-analysis.md`](docs/witness-budget-analysis.md).
+## What Interpres is NOT
 
-Every expensive stage has an independent content-addressed JSON cache. Keys
-include source, prompt/schema/pipeline version, model/provider/options, and the
-actual output hash of dependencies. A forced stochastic rerun therefore makes
-downstream cache entries stale without deleting the archived attempt.
+- ❌ Not a replacement for human scholarly review
+- ❌ Not proof that AI output is correct
+- ❌ Not for publishing unreviewed machine translations
+- ❌ Not a general-purpose RAG chatbot
 
-Evidence grades used in adjudication are:
+## Why does this exist?
 
-- A: deterministic or source-verifiable evidence;
-- B: retrieved corpus evidence requiring interpretation;
-- C: inference grounded in visible Latin/context;
-- D: unsupported model claim.
+Machine translation of historical texts is risky. Latin is highly inflected, context-dependent, and often ambiguous. A single wrong word choice can invert meaning. Interpres addresses this by:
 
-Serious issues may not be resolved solely from C/D evidence.
+1. **Multiple independent witnesses** — Two models translate blindly; agreement is interesting but not proof
+2. **Deterministic validation** — Rule-based checks catch obvious errors before humans review
+3. **Evidence retrieval** — Local corpus lookup provides concrete textual evidence
+4. **Explicit gates** — The system refuses to auto-approve high-severity corrections without evidence
+5. **Human-in-the-loop** — Final approval always requires human review of flagged items
 
-The initial prosecutor also has a hard provider-side preflight. Its mandatory
-core is the complete target, every quorum-permitted witness, high-severity
-checks, related lexical traps, and relevant structure expressed as target
-offsets rather than duplicated Latin. Lower-priority findings, morphology,
-structure, annotations, and context enter only in bounded priority tiers. The
-16,000-token/44,000-byte input ceiling leaves over 12,500 context tokens after
-the 4,200-token output allowance. A mandatory-core overflow fails as
-`prosecutor_input_budget_exceeded` without a provider call. Successful stage
-inputs retain the exact bounded request prompt, its digest, and the detailed
-inclusion/filtering receipt, so the model-facing view is directly auditable.
-
-Adjudicator requests are preflighted by a hard input-budget gate before any
-provider call. In normal mode the gate preserves the complete target Latin and
-both complete valid witnesses. In degraded mode it preserves the target and
-sole valid witness while withholding the invalid witness text from the model;
-that raw output remains in audit history. Both modes preserve prosecutor
-objections, non-pass deterministic findings for eligible proposals, and the
-receipts cited by high-severity objections. The gate deterministically reduces
-only lower-priority context/debug material. Every reduction is written into the
-stage cache as a budget receipt. If the mandatory core still does not fit, the
-stage fails with `adjudicator_input_budget_exceeded` and the provider is never
-called.
-
-The adjudicator is not a trusted editor. Its structured response is an
-immutable proposal that selects one complete witness and supplies bounded
-exact edits. A separately versioned deterministic finalization policy then:
-
-- reconstructs the draft from the selected witness rather than accepting
-  free-form replacement text;
-- enforces the persisted quorum independently, rejects an invalid base or
-  invalid-witness evidence citation, and keeps every single-valid result in
-  `human_review` with publication eligibility disabled;
-- sends any single edit over 48 words to human review, closing the loophole
-  where an exact edit could replace an entire witness paragraph;
-- also sends more than 96 cumulative edited words or more than 25% replacement
-  of the selected base witness to human review;
-- blocks automatic acceptance when eight or more contiguous target-Latin
-  words remain in the purported English draft;
-- verifies positive evidence citations against persisted receipts, so
-  `no_evidence_found`, `unavailable`, errors, unknown IDs, and unverified
-  research leads cannot support Grade-A/B claims;
-- requires each high-severity finding to have its own matching deterministic
-  support or a successful claim-relevant receipt; an unrelated Grade A/B claim
-  cannot globally bless other findings;
-- normalizes decisions carrying unresolved or human-review items away from
-  `accepted`/`corrected`.
-
-Raw provider responses and adjudicator-stage outputs remain read-only. These
-gates create only a derived finalization decision and precise review request.
-Fluency or confidence therefore cannot promote a wholesale rewrite, copied
-Latin, or unsupported evidence claim into an approved draft.
-
-Audit assembly follows the exact cache-key and output-digest dependency chain
-from the selected finalization record. A newer partial/orphan stage attempt is
-kept in history but cannot silently replace the stage that actually fed the
-adjudicator. `refinalize` reapplies only this local acceptance policy to a
-cached coherent adjudication chain and is guaranteed not to call a provider.
-
-## Environment and configuration
-
-Use the prepared environment:
+## Quick example
 
 ```powershell
-conda activate jerome
+# 1. Verify your setup
+interpres doctor
+
+# 2. Preprocess Jerome's Book I into chunks
+interpres preprocess jerome-ezekiel --book 1
+
+# 3. Build search indexes
+interpres build-concordance jerome-ezekiel --book 1
+interpres build-retrieval-index jerome-ezekiel
+
+# 4. Run one chunk through the pipeline
+interpres run jerome-ezekiel --book 1 --chunk 1
+
+# 5. Open the reviewer UI to inspect results
+interpres review jerome-ezekiel --book 1
 ```
 
-All paths, providers, role assignments, model options, chunk sizes, cache
-paths, retries, and evidence limits are in [`pipeline.yaml`](pipeline.yaml).
-The initial production assignments are:
+---
 
-- Witness A: Ollama `qwen3.5:9b`
-- Witness B: Ollama `mistral-small3.2:24b`
-- Blind structural parser: Ollama `qwen3.8:27b`
-- Prosecutor: OpenRouter `nvidia/nemotron-3-ultra-550b-a55b:free`, with
-  automatic Ollama `gemma3:27b` fallback
-- Adjudicator: Ollama `qwen3.8:27b`
+## Architecture overview
 
-The v4.1 script named `qwen38-27b-q4ks`, but a read-only Ollama tag probe on
-2026-08-24 reported that tag as IQ3_XXS. The installed `qwen3.8:27b` reports
-Q4_K_M, so the latter is the evidence-based Q4 assignment requested here.
-
-For OpenRouter, put the key in the ignored project-root `.env` file:
-
-```dotenv
-OPENROUTER_API_KEY=your-key-here
+```mermaid
+flowchart TD
+    A["📜 Latin Source<br/>(Corpus Corporum)"] --> B["Preprocessor<br/>(parse + chunk)"]
+    B --> C["Processing Chunks<br/>(target + context)"]
+    C --> D["🔍 Deterministic Checks<br/>(morphology + glossary)"]
+    C --> E["🧠 Structural Parser<br/>(blind parse)"]
+    E --> F["👁️ Witness A<br/>(independent translation)"]
+    E --> G["👁️ Witness B<br/>(independent translation)"]
+    F --> H["✅ Witness Validation<br/>(integrity checks)"]
+    G --> I["✅ Witness Validation<br/>(integrity checks)"]
+    H --> J["🚦 Quorum Gate<br/>(both/single/both-invalid)"]
+    I --> J
+    J --> K["🔎 Prosecutor<br/>(challenges + evidence)"]
+    K --> L["📚 Evidence Retrieval<br/>(concordance + Vulgate + CPDV)"]
+    L --> K
+    K --> M["⚖️ Adjudicator<br/>(selects edits)"]
+    M --> N["🏁 Finalizer<br/>(policy enforcement)"]
+    N --> O["📊 Human Review<br/>(read-only UI)"]
+    O --> P["✅ Editorial Precedent<br/>(append-only)"]
+    P --> Q["🔒 Immutable Audit<br/>(JSONL trail)"]
 ```
 
-The committed [`.env.example`](.env.example) contains the supported name but
-no secret. The loader reads `.env` beside `pipeline.yaml`; an existing process
-environment variable takes precedence. Never put the key in `pipeline.yaml`,
-source code, or Git. If the key is absent or the endpoint is unavailable, the
-prosecutor attempts its configured local fallback and records the fallback.
-Primary plus fallback failure is stored as `unavailable` or `failed`; it is
-never confused with `no_issue_found`.
+### The pipeline in plain English
 
-TranslateGemma remains disabled and outside production. Its observed local tag
-is `translategemma:27b`; set `enabled: true` under
-`models.experimental_translategemma`, then use `benchmark-witness` if you want
-to evaluate it. It is never silently substituted for a production witness.
+1. **Source → Chunks**: Raw Latin text is parsed into stable page-based units, then grouped into processing chunks (target Latin + surrounding context).
 
-## Core commands
+2. **Deterministic checks**: Before any AI is called, rule-based checks flag obvious issues — known mistranslations, missing words, wrong numbers, etc.
 
-All examples can use `python -m jerome_pipeline` or the compatible active
-entry point `python translate_book_v4_1.py`. The complete option-by-option
-operator guide is [`docs/command-reference.md`](docs/command-reference.md).
+3. **Witnesses**: Two independent AI models translate the target Latin **blind** — they see only the Latin, no other witness, no morphology, no English suggestions.
 
-Preprocess Book I and inspect canonical chunks:
+4. **Validation**: Each witness response is checked for integrity: did it translate the right text? Did it copy from the source? Is it suspiciously short/long?
+
+5. **Quorum**: 
+   - `both_valid` — normal path, both witnesses trusted
+   - `single_valid` — one witness failed validation, human review required
+   - `both_invalid` — stop, cannot proceed
+
+6. **Prosecutor**: A critical AI that challenges both witnesses. It asks: "Are you sure? What evidence supports this?" It can request evidence lookups.
+
+7. **Evidence**: Local corpus search (exact Latin, normalized forms, TF-IDF/LSA semantic search), Vulgate comparison, CPDV English comparison, Whitaker's morphology.
+
+8. **Adjudicator**: A judge AI that selects the best witness base and proposes **exact edits only** — it never rewrites the full text.
+
+9. **Finalizer**: Applies deterministic policy:
+   - Blocks auto-approval for degraded quorum
+   - Requires evidence citations for positive claims
+   - Sends large edits to human review
+   - Normalizes `unresolved`/`human_review` away from `accepted`
+
+10. **Human Review**: A local web UI shows machine artifacts as **read-only**. Humans make edits and resolve issues. Everything is append-only.
+
+11. **Audit**: Every stage is content-addressed and cached. Raw model responses are immutable. The full decision trail is preserved in JSONL.
+
+---
+
+## Key concepts
+
+### Witnesses
+Two independent AI translations of the same Latin text. They receive **only** the target Latin — no hints, no other witness, no morphology, no English. This ensures independence.
+
+### Quorum
+The validation result for the two witnesses:
+- **both_valid**: Both passed integrity checks — proceed normally
+- **single_valid_a/b**: One witness is trusted, the other rejected — degraded path, mandatory human review
+- **both_invalid**: Neither witness is trustworthy — stop before prosecution
+
+### Evidence-first
+No model output is trusted without verification. The prosecutor challenges every claim. Evidence receipts are persisted and verified. High-severity corrections require Grade-A/B evidence citations.
+
+### Content-addressed cache
+Every stage output is hashed. If input changes, the cache key changes. This ensures:
+- Reproducibility: same inputs → same outputs
+- Integrity: tampering with cached records breaks downstream provenance
+- Efficiency: unchanged stages are never recomputed
+
+### Human-in-the-loop
+The system is designed so that `unresolved` and `human_review` are **successful, honest outcomes**. The goal is not to minimize human intervention, but to make human intervention **meaningful and well-informed**.
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python 3.9+
+- Windows, macOS, or Linux
+- 8GB+ RAM recommended
+- Ollama (for local models) or OpenRouter API key
+
+### Setup
 
 ```powershell
-python translate_book_v4_1.py preprocess --book 1
-python translate_book_v4_1.py inspect-chunks --book 1 --limit 5
-python translate_book_v4_1.py inspect-chunks --book 1 --chunk 1 --full
+# Clone the repository
+git clone https://github.com/your-org/interpres.git
+cd interpres
+
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# Install dependencies
+pip install -r requirements.txt
+pip install -e .
+
+# Optional: Install Whitaker's Words (Latin morphology)
+pip install -e dependencies/whitakers_words
 ```
 
-Build the exact/normalized/lemma concordance, then the persisted inspectable
-TF-IDF + LSA retrieval index:
+### Configure models
+
+Edit `projects/jerome-ezekiel/pipeline.yaml` or create `.env`:
 
 ```powershell
-python translate_book_v4_1.py build-concordance --book 1
-python translate_book_v4_1.py build-retrieval-index
-python translate_book_v4_1.py search-corpus --query "concaluit cor meum" --limit 5
+# .env (git-ignored)
+OPENROUTER_API_KEY=sk-or-...
+OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-The retrieval artifact stores its vocabulary, IDF weights, LSA components,
-document vectors, exact Latin, stable source IDs, and provenance. Ranking is a
-deterministic lexical/LSA hybrid; no model summary is substituted for the
-retrieved Latin.
-
-The Jerome semantic index is deliberately separate from Scripture retrieval.
-`paths.vulgate` points to the local Clementine Latin Vulgate and is used for
-reference lookup plus exact/near Latin phrase matching. `paths.cpdv` points to
-the 74-file local CPDV corpus and supplies optional English comparison text for
-matched verses. ODR is a second optional English comparison adapter; it is not
-required for either Vulgate or CPDV lookup. A real configured Psalm 38:4 check
-returns the local Vulgate `Concaluit cor meum...` together with its CPDV
-comparison, while keeping Vulgate as textual evidence and CPDV as comparison
-help.
-
-Run one chunk, a range, or a whole configured book:
+### Verify setup
 
 ```powershell
-python translate_book_v4_1.py run --book 1 --chunk 1
-python translate_book_v4_1.py run --book 1 --start 1 --end 5
-python translate_book_v4_1.py run --book 1
+interpres doctor
 ```
 
-For live plumbing/schema smoke tests, use the explicit lightweight profile:
+---
+
+## Project structure
+
+```
+interpres/
+├── interpres/                 # Python package (pipeline engine)
+│   ├── cli.py                 # Command-line interface
+│   ├── pipeline.py            # Core pipeline orchestration
+│   ├── evidence.py            # Evidence retrieval and indexes
+│   ├── witnesses.py           # Witness validation and contracts
+│   ├── source.py              # Corpus parsing and chunking
+│   ├── cache.py               # Content-addressed stage cache
+│   ├── review.py              # Reviewer UI backend
+│   └── ...
+├── projects/
+│   └── jerome-ezekiel/        # Jerome project (config + data)
+│       ├── project.yaml       # Project metadata
+│       ├── pipeline.yaml      # Model and pipeline config
+│       ├── book1.txt          # Latin source (user-obtained)
+│       ├── challenges/        # Challenge test cases
+│       └── editorial/         # Human review decisions
+├── tests/                     # Provider-free regression tests
+├── docs/                      # Documentation
+├── scripts/                   # Utility scripts
+├── pyproject.toml             # Package metadata
+├── requirements.txt           # Runtime dependencies
+└── README.md                  # This file
+```
+
+---
+
+## Common workflows
+
+### First-time setup
 
 ```powershell
-python translate_book_v4_1.py run --profile smoke --chunk 1 --through structural_parse
-python translate_book_v4_1.py resume --profile smoke --chunk 1
+# 1. Verify environment
+interpres doctor
+
+# 2. Obtain source (manual step)
+# Download Jerome Book I from Corpus Corporum
+# Save to: projects/jerome-ezekiel/book1.txt
+
+# 3. Preprocess
+interpres preprocess jerome-ezekiel --book 1
+
+# 4. Build indexes
+interpres build-concordance jerome-ezekiel --book 1
+interpres build-retrieval-index jerome-ezekiel
+
+# 5. Smoke test (no API keys needed)
+interpres run jerome-ezekiel --book 1 --chunk 1 --profile smoke --through structural_parse
 ```
 
-`smoke` uses Qwen 3.5 9B for every LLM role. Its translations and decisions
-are not outcome evaluations and must not be promoted into production audits.
-Smoke calls have no model fallback and no automatic transport retry. Their
-cache/audit records carry `execution_profile: smoke`; normal audit export reads
-only `production`, so a smoke attempt cannot silently replace a proper result.
-Unit/mocked tests remain fully fake-provider based and call no model at all.
-Omit `--profile smoke` (the default is `production`) only when evaluating real
-translation outcomes with the configured proper models.
-
-Stop after a stage, retry failures, or force exactly one stage:
+### Running the full pipeline
 
 ```powershell
-python translate_book_v4_1.py run --chunk 1 --through structural_parse
-python translate_book_v4_1.py resume --chunk 1
-python translate_book_v4_1.py run --chunk 1 --force-stage prosecutor_initial
+# Run all chunks for Book I
+interpres run jerome-ezekiel --book 1
+
+# Run specific chunks
+interpres run jerome-ezekiel --book 1 --chunk 1 --chunk 5
+
+# Run a range
+interpres run jerome-ezekiel --book 1 --start 1 --end 10
+
+# Resume interrupted runs
+interpres resume jerome-ezekiel --book 1
+
+# Retry only failed chunks
+interpres resume-failed jerome-ezekiel --book 1
 ```
 
-List only attempted chunks whose latest current-source production stage
-failed, preview the overnight retry snapshot, or resume that snapshot:
+### Inspecting results
 
 ```powershell
-python translate_book_v4_1.py failed-chunks --book 1
-python translate_book_v4_1.py resume-failed --book 1 --dry-run
-python translate_book_v4_1.py resume-failed --book 1
+# List chunks needing review
+interpres review-flags jerome-ezekiel --book 1
+
+# Inspect specific chunk cache
+interpres inspect-cache --chunk book01-pl-0015A --summary
+
+# See evidence used for a chunk
+interpres inspect-evidence --chunk book01-pl-0015A
+
+# Export full audit trail
+interpres export-audit jerome-ezekiel --book 1
 ```
 
-`resume-failed` continues through every selected job even if an earlier job
-fails, then exits non-zero if any remain incomplete. `--limit N` bounds a
-batch. It excludes never-started chunks, stale-source records, smoke failures
-when using the production profile, and successful `human_review`/`unresolved`
-outcomes. Thus it does not silently start the rest of a book.
-
-Apply the new witness gate to an existing cached pair without calling a model:
+### Human review
 
 ```powershell
-python translate_book_v4_1.py validate-witnesses --book 1 --start 4 --end 5
+# Start reviewer UI
+interpres review jerome-ezekiel --book 1
+
+# In the UI:
+# - Machine output is read-only
+# - Edit the human translation field
+# - Resolve issues in the ledger
+# - Save creates append-only revision file
 ```
 
-The command exits `0` for `both_valid`, `single_valid_a`, or `single_valid_b`;
-the single-valid results are safe degraded states, not automatic approvals. It
-exits non-zero only for blocked `both_invalid`. It never edits or reruns either
-witness.
+### Updating finalization policy
 
-Inspect cache/evidence/review output and export audits:
+If you change acceptance policy (e.g., evidence requirements), reapply without recomputing upstream:
 
 ```powershell
-python translate_book_v4_1.py inspect-cache --chunk book01-pl-0015A--pl-0017A-f82ad2653b --summary
-python translate_book_v4_1.py inspect-evidence --chunk book01-pl-0015A--pl-0017A-f82ad2653b
-python translate_book_v4_1.py review-flags --book 1
-python translate_book_v4_1.py export-audit --book 1
+interpres refinalize jerome-ezekiel --book 1 --start 1 --end 5
 ```
 
-Open the local reviewer/editor workspace over the persisted Book I artifacts:
+---
 
-```powershell
-python translate_book_v4_1.py review --book 1
-```
+## Data and licensing
 
-The machine audit remains read-only. Human edits and issue resolutions are
-saved as new append-only revision files; neither the LLM output nor a prior
-editorial revision is edited. Explicitly approved reusable resolutions become
-separate editorial precedent for matching later Latin while the blind
-witnesses remain unaffected. See [`docs/reviewer-ui.md`](docs/reviewer-ui.md).
+Corpus files are **not committed** to this repository due to licensing restrictions.
 
-Compare against explicit v4/v4.1 artifacts (none were present at their former
-hard-coded locations during this refactor):
+| Asset | Source | License |
+|-------|--------|---------|
+| Jerome Book I | [Corpus Corporum](https://mlat.uzh.ch/browser/cps_2.HieStr.CoInEz) | Public domain text; verify digital edition license |
+| Clementine Vulgate | [vul-complete](https://github.com/theunpleasantowl/vul-complete) | Public domain |
+| CPDV | [Following Imperfectly](https://github.com/following-imperfectly/cpdv-json) | Permission granted |
+| Whitaker's Words | [blagae/whitakers_words](https://github.com/blagae/whitakers_words) | MIT |
 
-```powershell
-python translate_book_v4_1.py compare-v4 --book 1 `
-  --qwen C:\path\book1-qwen35-v4.1.jsonl `
-  --mistral C:\path\book1-mistral-v4.1.jsonl `
-  --prosecutor C:\path\book1-prosecutor-v4.1.jsonl `
-  --review C:\path\book1-reviewed-v4.1.jsonl `
-  --output artifacts\book01\v4-comparison.json
-```
+See [docs/data-and-licensing.md](docs/data-and-licensing.md) for details.
 
-The report shows available old witnesses/adjudication, new structure,
-prosecutor/evidence rounds, new decision, status change, and newly surfaced
-human flags. It reports absent legacy material rather than pretending a match.
+---
 
-Benchmark an optional isolated witness without changing production roles:
+## Testing
 
-```powershell
-python translate_book_v4_1.py benchmark-witness --model-role experimental_translategemma --chunk 1
-```
-
-## Challenge/evaluation harness
-
-Challenge labels are kept in the curated JSONL but omitted from the reviewer
-prompt. The set includes real difficult passages, a clean control, and planted
-negation, number, lexical-polarity, proper-name, Scripture, subject/object,
-omission, attachment, and unsupported-certainty errors.
-
-```powershell
-python translate_book_v4_1.py challenge inspect
-python translate_book_v4_1.py challenge run
-python translate_book_v4_1.py challenge report
-```
-
-For a model-free calibration of deterministic detection:
-
-```powershell
-python translate_book_v4_1.py challenge run --deterministic-only
-```
-
-For the real staged challenge path, each frozen candidate is injected into
-both witness slots. This intentionally creates agreement around the candidate
-under test; the normal structural parser, deterministic checks, prosecutor,
-research rounds, and adjudicator must still find and resolve planted errors:
-
-```powershell
-python translate_book_v4_1.py challenge run --full-pipeline
-```
-
-This command uses the configured production models unless a caller injects a
-fake provider in tests. It stores resumable stage records under
-`artifacts/challenge-cache`; challenge labels and mutation metadata are never
-included in model prompts.
-
-```powershell
-python translate_book_v4_1.py inspect-cache --challenge `
-  --chunk challenge-jerome-concaluit-polarity --summary
-```
-
-Metrics include planted errors detected/missed, first detecting stage,
-unexpected flags, clean-case false positives, unresolved rate, and reviewer
-failures. They are regression/calibration measures for this project, not a
-universal accuracy percentage.
-
-The current model-free baseline covers all 11 curated cases: deterministic
-signals catch 4 of 12 planted errors and flag none on the clean control. This
-is a floor, not an accuracy target—attachment, subject/object, subtle omission,
-and unsupported-certainty cases are intentionally left for structural and
-adversarial model stages rather than guessed by brittle heuristics.
-
-## Tests
-
-Ordinary tests never invoke live models:
+All tests are **provider-free** — they never call live models:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The installed Whitaker adapter contract tests do use the local deterministic
-dictionary package. They cover `memoriae`, `concaluit`, `plagas`,
-`tribus/tribusque`, proper names, and unknown forms. Other offline regressions
-cover Roman-numeral/date preservation, query-window Scripture near matches,
-provider timeout/retry/fallback, adjacent-unit concordance context, and failed
-research-stage receipt preservation.
+158 tests covering: pipeline stages, witness validation, evidence retrieval, cache integrity, audit trails, reviewer UI, challenge harness.
 
-## Editorial memory
+---
 
-Human style conventions belong in [`style_decisions.md`](style_decisions.md),
-not the glossary. Structured decisions/reviews are append-only:
+## Contributing
 
-```powershell
-python translate_book_v4_1.py record-editorial --kind human_review `
-  --source-unit book01-pl-0017B `
-  --issue "tribus Judae has an incomplete deterministic parse" 
-python translate_book_v4_1.py inspect-editorial
-```
+We welcome contributions from:
 
-The browser editor also writes chunk-level revision snapshots to
-`editorial/reviews/`. Only approved, resolved, explicitly reusable wording is
-indexed as editorial precedent. This stays separate from claims about Latin
-meaning and from corpus/Scripture/CPDV evidence.
+- **Latinists and patristics scholars** — review machine drafts, extend lexical traps
+- **Textual critics** — validate source citations and provenance
+- **Software engineers** — improve pipeline auditability and determinism
 
-## Files created or refactored
+See [CONTRIBUTING.md](CONTRIBUTING.md). Model outputs are not authoritative; evidence and human review are.
 
-- `translate_book_v4_1.py`: active compatibility entry point into the new CLI
-- `pipeline.yaml`: centralized configuration and actual tested model tags
-- `jerome_pipeline/source.py`: canonical parsing, provenance, and chunking
-- `glossary.py`: observed Whitaker adapter, full morphology, lemma-based traps
-- `jerome_pipeline/providers.py`: configurable Ollama/OpenRouter with fallback
-- `jerome_pipeline/cache.py`: independent, auditable stage cache
-- `jerome_pipeline/prompts.py` and `schemas.py`: blinded prompts and validation
-- `jerome_pipeline/checks.py`: cheap deterministic signals
-- `jerome_pipeline/evidence.py`: concordance, Scripture, morphology, local
-  authorities, ODR comparison, and bounded evidence receipts
-- `jerome_pipeline/retrieval.py`: persisted inspectable TF-IDF/LSA retrieval
-- `jerome_pipeline/pipeline.py`: resumable bounded orchestration and audit
-- `jerome_pipeline/review.py`: stable reviewer view model and immutable
-  machine-artifact adapter
-- `jerome_pipeline/editorial.py`: append-only revisions and approved editorial
-  precedent index
-- `jerome_pipeline/review_server.py` and `reviewer_ui/`: local API and browser
-  review application
-- `jerome_pipeline/challenge.py`: blinded challenge runner and metrics
-- `jerome_pipeline/reports.py`: v4/v4.1 compatibility report
-- `docs/structural-parse-validation.md`: observed cutoff diagnosis and repeated
-  chunk 1 live receipts
-- `docs/command-reference.md`: every CLI command, option family, model-call
-  boundary, failure-batch behavior, and exit code
-- `docs/research-evidence.md`: RAG, authority, ODR, and optional-web contracts
-- `docs/reviewer-ui.md`: editing, immutability, and precedent operating guide
-- `tests/`: deterministic and mocked vertical-slice coverage
+---
 
-## Known limitations and manual preparation before full Book I
+## License
 
-- Verify that the four configured local Ollama tags are installed and callable.
-  This task does not install models, CUDA, Ollama, or system dependencies.
-- The OpenRouter key is now configured in the ignored `.env`. Keep it there;
-  verify the Nemotron endpoint only when starting controlled live acceptance.
-  The local Gemma fallback should also be checked before a long run.
-- Build the concordance with lemmas and then `build-retrieval-index` before a
-  production run. The no-lemma mode is useful only for fast source diagnostics.
-- The observed Whitaker data recognizes `tribus/tribusque` as the numeral
-  “three” but fails to expose the noun “tribe” in `tribus Judae`. The structural
-  parser must put that noun analysis under `unverified_analyses`; this is a
-  recorded backend gap, not a reason to fabricate morphology.
-- The lexicon is primarily classical and will miss patristic/biblical forms and
-  names. `not_found` means unresolved by this backend, not rare or wrong.
-- Deterministic coverage/name/number/Roman-numeral checks are conservative
-  signals, not semantic proofs. The adjudicator still needs to inspect the
-  Latin.
-- The original structural prompt exhausted 3,000/3,600-token ceilings, and an
-  earlier Qwen 3.5 smoke response exhausted 5,200. The model-facing structural
-  schema is now compact and provider-constrained, while the canonical audit
-  schema is restored deterministically. Three forced `qwen3.8:27b` chunk 1
-  runs passed consecutively at 2,229, 2,974, and 3,230 tokens with natural
-  `stop` reasons and 1,970–2,971 tokens of remaining margin. Diagnosis and
-  receipts are in [`docs/structural-parse-validation.md`](docs/structural-parse-validation.md).
-  A later, larger 20-sentence chunk completed its sentence records but reached
-  the 5,200-token ceiling in its final ambiguity array. Production now allows
-  7,200 output tokens for targets with at least 12 sentences while keeping the
-  same compact schema and validation; smaller production inputs and smoke
-  remain at 5,200. This lets chunk 1 reuse its validated structural cache. The
-  five-chunk acceptance attempt produced three
-  complete human-review records and two targeted failures that now require
-  reruns through Reviewer UI v1:
+MIT License. See [LICENSE](LICENSE).
 
-  ```powershell
-  python translate_book_v4_1.py preprocess --book 1
-  python translate_book_v4_1.py resume --book 1 --start 2 --end 2 --through structural_parse
-  # Only after the live structural schema gate passes:
-  python translate_book_v4_1.py resume --book 1 --start 1 --end 1
-  python translate_book_v4_1.py resume --book 1 --start 2 --end 2
-  python translate_book_v4_1.py resume --book 1 --start 3 --end 3
-  python translate_book_v4_1.py resume --book 1 --start 5 --end 5
-  python translate_book_v4_1.py review --book 1
-  ```
+## Documentation
 
-  The requested 5–10 complete live chunks remain an acceptance step, not a
-  unit-test requirement. Use production roles only for those outcome tests;
-  keep `--profile smoke` for quick transport/schema checks.
-- A corrective chunk 3 run subsequently reached the prosecutor's exact 3,200-
-  token output ceiling after completing 13 challenges and overproducing 11
-  evidence requests, although only six can be executed. Prosecutor inputs are
-  now losslessly minified, reports are capped at 12 consolidated challenges
-  and six prioritized requests, and production has 4,200 output tokens to
-  close the JSON. On the observed input this reduces the prompt from 111,210
-  to 85,363 UTF-8 bytes; smoke remains at 3,200 output tokens.
-- Corpus Corporum's sequential edition-pagination tokens may occur inside a
-  prose line as either a range or a single number. Preprocessing records and
-  removes those tokens outside parentheses/brackets, while preserving biblical
-  citation numbers and page-broken continuations such as `2).`. Correcting this
-  changed the target fingerprint for Book I chunks 3 and 5. Stable chunk IDs
-  remain unchanged, but the reviewer refuses cache records belonging to the
-  previous source fingerprint; those chunks must be rerun before their old
-  decisions can be treated as current.
-- The local Vulgate TSV repeats identical canon rows; the loader deterministically
-  de-duplicates references. CPDV is always labelled comparison help.
-- Only Book I is configured. `Full corpus (Book I-XIV).txt` is now a valid
-  fourteen-book Corpus Corporum download, but combined-corpus book/footnote
-  splitting is intentionally deferred while Book I acceptance is completed.
-- Semantic retrieval is an inspectable persisted local TF-IDF/LSA index. Local
-  chronology, proper-name, source-edition, and ODR files are optional: missing
-  files produce `unavailable`, while a configured index with no match produces
-  `no_evidence_found`. Optional web research requires an injected backend, is
-  disabled by default, and can emit only unverified `research_lead` records.
-- No copyrighted published translation was added or used as drafting input.
-- The local editor writes only append-only revision files. Reviewer accounts,
-  shared multi-user locking, deployment, and automatic/fuzzy replacement
-  remain deliberately deferred.
-
-
-## Architecture diagram
-
-```
-                         ST JEROME TRANSLATION PIPELINE
-                    "Models propose; evidence must verify"
-
-
- Full Corpus: Commentaria in Ezechielem, Books I–XIV
-                              |
-                              v
-          +-------------------------------------------+
-          | Combined-corpus book splitter [PENDING]   |
-          | - recognise Books I–XIV                   |
-          | - preserve PL pages and footnotes         |
-          +-------------------------------------------+
-                              |
-                              v
-          +-------------------------------------------+
-          | Canonical source parser                   |
-          | PL page units -> 3–4-unit chunks          |
-          | target Latin + read-only context          |
-          +-------------------------------------------+
-                              |
-                 one independently cached chunk
-                              |
-           +------------------+------------------+
-           |                                     |
-           v                                     v
- +----------------------+              +----------------------+
- | Deterministic        |              | Blind structural     |
- | morphology/glossary  |------------->| parser               |
- | Whitaker backends    | candidates   | Qwen 3.8 27B         |
- +----------------------+              | NO English witnesses |
-                                       +----------------------+
-
-                              |
-               +--------------+--------------+
-               |                             |
-               v                             v
-     +-------------------+         +-------------------------+
-     | Witness A         |         | Witness B               |
-     | Qwen 3.5 9B       |         | Mistral Small 3.2 24B   |
-     | Latin -> English  |         | Latin -> English        |
-     | target-only text  |         | target-only text        |
-     | immutable raw v4  |         | immutable raw v4        |
-     +-------------------+         +-------------------------+
-               |                             |
-               +--------------+--------------+
-                              |
-                              v
-                +---------------------------+
-                | Witness validation + gate |
-                | - exact target identity   |
-                | - name multiplicity       |
-                | - no Latin/context copy   |
-                | - persisted quorum state  |
-                +---------------------------+
-                   /           |            \
-        both_invalid     single_valid_*     both_valid
-             |          degraded / one base     |
-             v                |                  |
-       STOP INCOMPLETE        +---------+--------+
-                                        |
-                                        v
-                +---------------------------+
-                | Deterministic checks      |
-                | - omissions/additions     |
-                | - numbers and negations   |
-                | - proper names            |
-                | - known lexical traps     |
-                | - Scripture/source checks |
-                +---------------------------+
-                              |
-                              v
-                +---------------------------+
-                | Prosecutor: initial review|
-                | Nemotron via OpenRouter   |
-                | Gemma local fallback      |
-                | Reviews every chunk       |
-                +---------------------------+
-                              |
-                    structured evidence requests
-                              |
-                              v
-       +-----------------------------------------------------+
-       | RESEARCH AGENT / EVIDENCE SERVICE                   |
-       |                                                     |
-       |  1. Jerome exact/lemma concordance                  |
-       |  2. Jerome semantic RAG (TF-IDF + LSA)              |
-       |  3. Latin Clementine Vulgate                        |
-       |  4. CPDV English comparison                         |
-       |  5. Whitaker morphology/glossary                    |
-       |  6. Optional curated authorities                    |
-       |     - proper names                                  |
-       |     - chronology                                    |
-       |     - source editions                               |
-       |                                                     |
-       | Returns source text + provenance, not model memory  |
-       +-----------------------------------------------------+
-                              |
-                       evidence receipts
-                              |
-                              v
-                +---------------------------+
-                | Grounded prosecutor       |
-                | - accepts/revises claims  |
-                | - cites evidence IDs      |
-                | - preserves uncertainty   |
-                +---------------------------+
-                              |
-                              v
-                +---------------------------+
-                | Initial adjudicator       |
-                | Qwen 3.8 27B              |
-                |                           |
-                | Selects permitted valid   |
-                | Witness A and/or B base   |
-                | Returns exact edits only  |
-                | Does NOT rewrite full text|
-                +---------------------------+
-                              |
-                Does it request more evidence?
-                         /             \
-                       yes              no
-                       /                 \
-                      v                   |
-       +-----------------------------+    |
-       | Targeted evidence round     |    |
-       | bounded by configured limit |    |
-       +-----------------------------+    |
-                      |                   |
-                      +---------+---------+
-                                |
-                                v
-                 +----------------------------+
-                 | Final adjudication         |
-                 | base witness + exact edits |
-                 +----------------------------+
-                                |
-                                v
-                 +----------------------------+
-                 | Deterministic finalizer    |
-                 | - applies exact edits      |
-                 | - reconstructs full draft  |
-                 | - rejects ambiguous edits  |
-                 | - reruns final checks      |
-                 | - enforces quorum/base     |
-                 | - degraded => human review |
-                 +----------------------------+
-                                |
-                                v
-          +-----------+-----------+------------+--------------+
-          |           |           |            |              |
-       ACCEPTED    CORRECTED   UNRESOLVED   HUMAN_REVIEW   INCOMPLETE
-          |           |           |            |              |
-          +-----------+-----------+------------+--------------+
-                                |
-                                v
-                 +----------------------------+
-                 | Audit and provenance JSONL |
-                 | - prompts and raw responses|
-                 | - model/provider/options   |
-                 | - evidence receipts        |
-                 | - dependency hashes        |
-                 | - checks and final draft   |
-                 +----------------------------+
-
-
- Every stage is content-addressed and independently cached.
- A changed input or dependency invalidates downstream cached results.
- ```
+See [docs/index.md](docs/index.md) for all documentation, including:
+- [Getting started](docs/getting-started.md) — setup and first run
+- [Usage guide](docs/usage.md) — detailed CLI workflows
+- [Architecture](docs/architecture.md) — how the pipeline works
+- [Architecture diagrams](docs/architecture-diagram.md) — visual explanations
+- [Command reference](docs/command-reference.md) — complete CLI reference
+- [Reviewer UI](docs/reviewer-ui.md) — human review workspace

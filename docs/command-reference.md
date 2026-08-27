@@ -1,20 +1,17 @@
 # Command reference
 
-This is the complete operator reference for the CLI implemented by
-`translate_book_v4_1.py`. The equivalent module form is
-`python -m jerome_pipeline`.
+This is the complete operator reference for the Interpres CLI.
 
 ```powershell
-conda activate jerome
-python translate_book_v4_1.py --help
-python translate_book_v4_1.py COMMAND --help
+interpres --help
+interpres COMMAND --help
 ```
 
 The global `--config PATH` option must appear before the command. It defaults
 to `pipeline.yaml`:
 
 ```powershell
-python translate_book_v4_1.py --config pipeline.yaml inspect-chunks --book 1
+interpres inspect-chunks jerome-ezekiel --book 1
 ```
 
 ## Shared chunk selection
@@ -53,6 +50,38 @@ finalize
 `--profile smoke` uses lightweight Qwen 3.5 roles for transport/schema checks;
 smoke results are isolated and must not be treated as translation outcomes.
 
+## Project management
+
+### `project list`
+
+List available Interpres projects found under `projects/`.
+
+```powershell
+interpres project list
+```
+
+### `project show`
+
+Show details for one project, including its pipeline and README paths.
+
+```powershell
+interpres project show jerome-ezekiel
+```
+
+## Diagnostics
+
+### `doctor`
+
+Verify the Python environment, optional dependencies, configured source files,
+corpus paths, indexes, and API key presence without calling any model.
+
+```powershell
+interpres doctor
+```
+
+Exit code `0` means every required check passed; non-zero lists missing
+dependencies or data files.
+
 ## Source and retrieval
 
 ### `preprocess`
@@ -62,7 +91,7 @@ derived files under `artifacts/bookNN/`; it does not call a model or alter LLM
 cache records.
 
 ```powershell
-python translate_book_v4_1.py preprocess --book 1
+interpres preprocess jerome-ezekiel --book 1
 ```
 
 ### `inspect-chunks`
@@ -71,8 +100,8 @@ Read canonical chunks without running the pipeline. The default view is a
 summary; `--full` prints complete chunk JSON.
 
 ```powershell
-python translate_book_v4_1.py inspect-chunks --book 1 --limit 5
-python translate_book_v4_1.py inspect-chunks --book 1 --chunk 3 --full
+interpres inspect-chunks jerome-ezekiel --book 1 --limit 5
+interpres inspect-chunks jerome-ezekiel --book 1 --chunk 3 --full
 ```
 
 ### `build-concordance`
@@ -85,8 +114,8 @@ Repeat `--book` to include several configured books. `--no-lemmas` is a faster
 source-diagnostic mode and is not recommended for a production evidence run.
 
 ```powershell
-python translate_book_v4_1.py build-concordance --book 1
-python translate_book_v4_1.py build-concordance --book 1 --no-lemmas
+interpres build-concordance jerome-ezekiel --book 1
+interpres build-concordance jerome-ezekiel --book 1 --no-lemmas
 ```
 
 ### `build-retrieval-index`
@@ -96,7 +125,7 @@ concordance. The index records the concordance and canonical-source digests;
 stale combinations are refused. No model is called.
 
 ```powershell
-python translate_book_v4_1.py build-retrieval-index
+interpres build-retrieval-index jerome-ezekiel
 ```
 
 ### `search-corpus`
@@ -105,7 +134,7 @@ Inspect local retrieval results for a query. It is read-only and exits with
 code `1` when the retrieval index is unavailable.
 
 ```powershell
-python translate_book_v4_1.py search-corpus `
+interpres search-corpus jerome-ezekiel `
   --query "concaluit cor meum" --limit 5
 ```
 
@@ -119,11 +148,11 @@ stops deliberately after that stage. `--force-stage STAGE` reruns exactly that
 stage; changed output naturally invalidates dependent downstream cache keys.
 
 ```powershell
-python translate_book_v4_1.py run --book 1 --chunk 1
-python translate_book_v4_1.py run --book 1 --start 1 --end 5
-python translate_book_v4_1.py run --chunk 1 --through structural_parse
-python translate_book_v4_1.py run --chunk 1 --force-stage prosecutor_initial
-python translate_book_v4_1.py run --chunk 1 --retry-failed
+interpres run jerome-ezekiel --book 1 --chunk 1
+interpres run jerome-ezekiel --book 1 --start 1 --end 5
+interpres run jerome-ezekiel --chunk 1 --through structural_parse
+interpres run jerome-ezekiel --chunk 1 --force-stage prosecutor_initial
+interpres run jerome-ezekiel --chunk 1 --retry-failed
 ```
 
 This can invoke production models. It exits with code `1` if any selected
@@ -135,9 +164,9 @@ Equivalent to `run` with failed-stage retry enabled. Complete compatible stages
 are reused, so it resumes at the first missing or failed cache dependency.
 
 ```powershell
-python translate_book_v4_1.py resume --book 1 --chunk 3
-python translate_book_v4_1.py resume --book 1 --start 1 --end 5
-python translate_book_v4_1.py resume --profile smoke --chunk 1
+interpres resume --book 1 --chunk 3
+interpres resume --book 1 --start 1 --end 5
+interpres resume --profile smoke --chunk 1
 ```
 
 This can invoke models and exits with code `1` if any selected chunk remains
@@ -151,8 +180,8 @@ never-started chunks, stale-source records, and successful editorial outcomes
 such as `human_review`.
 
 ```powershell
-python translate_book_v4_1.py failed-chunks --book 1
-python translate_book_v4_1.py failed-chunks --book 1 --profile smoke
+interpres failed-chunks --book 1
+interpres failed-chunks --book 1 --profile smoke
 ```
 
 This is read-only and never calls a model.
@@ -165,10 +194,10 @@ incomplete. `--dry-run` is the safe preview; `--limit N` bounds an overnight
 batch. It does not start untouched chunks.
 
 ```powershell
-python translate_book_v4_1.py resume-failed --book 1 --dry-run
-python translate_book_v4_1.py resume-failed --book 1
-python translate_book_v4_1.py resume-failed --book 1 --limit 3
-python translate_book_v4_1.py resume-failed --book 1 `
+interpres resume-failed --book 1 --dry-run
+interpres resume-failed --book 1
+interpres resume-failed --book 1 --limit 3
+interpres resume-failed --book 1 `
   --through adjudicator_initial
 ```
 
@@ -182,9 +211,9 @@ upstream stages and never calls a model provider. It is the safe command after
 a finalization-policy upgrade.
 
 ```powershell
-python translate_book_v4_1.py refinalize --book 1 --start 1 --end 5
-python translate_book_v4_1.py refinalize --book 1 --chunk book01-pl-0020D
-python translate_book_v4_1.py refinalize --book 1 --start 5 --end 5 --force
+interpres refinalize --book 1 --start 1 --end 5
+interpres refinalize --book 1 --chunk book01-pl-0020D
+interpres refinalize --book 1 --start 5 --end 5 --force
 ```
 
 `--force` archives and replaces an existing result for the same policy key;
@@ -203,8 +232,8 @@ model provider. It derives and persists one of the explicit quorum states
 `both_valid`, `single_valid_a`, `single_valid_b`, or `both_invalid`.
 
 ```powershell
-python translate_book_v4_1.py validate-witnesses --book 1 --start 4 --end 5
-python translate_book_v4_1.py validate-witnesses --book 1 --chunk 5 --force
+interpres validate-witnesses --book 1 --start 4 --end 5
+interpres validate-witnesses --book 1 --chunk 5 --force
 ```
 
 Exit code `0` means the pair is safe to process: either both are valid or one is
@@ -221,7 +250,7 @@ adjudication path. `--force` reruns it and `--retry-failed` retries a failed
 experimental record.
 
 ```powershell
-python translate_book_v4_1.py benchmark-witness `
+interpres benchmark-witness `
   --model-role experimental_translategemma --chunk 1
 ```
 
@@ -236,11 +265,11 @@ Read persisted stage records. Filter by exact chunk ID and/or stage.
 attempts, and `--challenge` switches to the isolated challenge cache.
 
 ```powershell
-python translate_book_v4_1.py inspect-cache `
+interpres inspect-cache `
   --chunk book01-pl-0015A--pl-0017A-f82ad2653b --summary
-python translate_book_v4_1.py inspect-cache `
+interpres inspect-cache `
   --stage adjudicator_initial --attempts
-python translate_book_v4_1.py inspect-cache --challenge --summary
+interpres inspect-cache --challenge --summary
 ```
 
 This is read-only and never calls a model.
@@ -251,7 +280,7 @@ Show the prosecutor/adjudicator evidence requests and research receipts stored
 for one exact chunk ID.
 
 ```powershell
-python translate_book_v4_1.py inspect-evidence `
+interpres inspect-evidence `
   --chunk book01-pl-0015A--pl-0017A-f82ad2653b
 ```
 
@@ -263,7 +292,7 @@ List current production chunks whose completed status is `human_review` or
 `unresolved`, plus incomplete chunks and their precise requests/issues.
 
 ```powershell
-python translate_book_v4_1.py review-flags --book 1
+interpres review-flags --book 1
 ```
 
 This is read-only.
@@ -275,8 +304,8 @@ Write complete per-chunk provenance as JSONL. The default path is
 derived audit export but does not edit stage records or LLM output.
 
 ```powershell
-python translate_book_v4_1.py export-audit --book 1
-python translate_book_v4_1.py export-audit --book 1 `
+interpres export-audit --book 1
+interpres export-audit --book 1 `
   --output artifacts\book01\acceptance-audit.jsonl
 ```
 
@@ -287,8 +316,8 @@ Start the local reviewer/editor server. It opens a browser unless
 saved as append-only revision files.
 
 ```powershell
-python translate_book_v4_1.py review --book 1
-python translate_book_v4_1.py review --book 1 `
+interpres review --book 1
+interpres review --book 1 `
   --host 127.0.0.1 --port 8876 --no-browser
 ```
 
@@ -302,7 +331,7 @@ than inferred. `--audit` supplies a pre-exported current audit and `--output`
 writes the comparison report.
 
 ```powershell
-python translate_book_v4_1.py compare-v4 --book 1 `
+interpres compare-v4 --book 1 `
   --qwen C:\path\qwen.jsonl `
   --mistral C:\path\mistral.jsonl `
   --prosecutor C:\path\prosecutor.jsonl `
@@ -320,8 +349,8 @@ Show challenge metadata without sending challenge labels to a model. Add
 `--case CASE_ID` to select one case.
 
 ```powershell
-python translate_book_v4_1.py challenge inspect
-python translate_book_v4_1.py challenge inspect --case jerome-concaluit-polarity
+interpres challenge inspect
+interpres challenge inspect --case jerome-concaluit-polarity
 ```
 
 ### `challenge run`
@@ -335,9 +364,9 @@ Run the challenge harness and write its result artifact:
   configured production role.
 
 ```powershell
-python translate_book_v4_1.py challenge run
-python translate_book_v4_1.py challenge run --deterministic-only
-python translate_book_v4_1.py challenge run --full-pipeline
+interpres challenge run
+interpres challenge run --deterministic-only
+interpres challenge run --full-pipeline
 ```
 
 `--deterministic-only` and `--full-pipeline` are mutually exclusive.
@@ -348,7 +377,7 @@ Read and summarize the most recent challenge result artifact. It calls no
 model.
 
 ```powershell
-python translate_book_v4_1.py challenge report
+interpres challenge report
 ```
 
 ## Append-only editorial records
@@ -361,7 +390,7 @@ several units. `--supersedes` links a replacement decision. This command does
 not modify machine/LLM artifacts.
 
 ```powershell
-python translate_book_v4_1.py record-editorial `
+interpres record-editorial `
   --kind human_review `
   --source-unit book01-pl-0017B `
   --issue "tribus Judae has an incomplete deterministic parse"
@@ -376,8 +405,8 @@ Read append-only editorial records. `--kind` filters to one of `decision`,
 `human_review`, or `resolution`.
 
 ```powershell
-python translate_book_v4_1.py inspect-editorial
-python translate_book_v4_1.py inspect-editorial --kind resolution
+interpres inspect-editorial
+interpres inspect-editorial --kind resolution
 ```
 
 ## Exit codes and help
@@ -392,7 +421,7 @@ python translate_book_v4_1.py inspect-editorial --kind resolution
 For the parser-authoritative option list at any time:
 
 ```powershell
-python translate_book_v4_1.py --help
-python translate_book_v4_1.py resume-failed --help
-python translate_book_v4_1.py challenge run --help
+interpres --help
+interpres resume-failed --help
+interpres challenge run --help
 ```

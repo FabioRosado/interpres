@@ -8,7 +8,6 @@ from typing import Any
 
 from .source import split_sentences
 
-
 ADJUDICATOR_INPUT_BUDGET_POLICY_VERSION = 2
 PROSECUTOR_INPUT_BUDGET_POLICY_VERSION = 1
 

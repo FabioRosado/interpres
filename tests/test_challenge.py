@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 
 from glossary import MorphologicalCandidate, Sense, WordAnalysis
-
-from jerome_pipeline.challenge import challenge_metrics, run_challenges
-from jerome_pipeline.config import PipelineConfig, load_config
-from jerome_pipeline.providers import ProviderResponse
+from interpres.challenge import challenge_metrics, run_challenges
+from interpres.config import PipelineConfig, load_config
+from interpres.evidence import build_concordance, build_retrieval_index
+from interpres.providers import ProviderResponse
 
 
 class ChallengeLexicon:
@@ -153,12 +153,25 @@ class ChallengePipelineTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            source_file = root / "book1.txt"
+            source_file.write_text(
+                "LIBER PRIMUS.\n\n"
+                "-----------------------------[page 0016A]------------------------------\n"
+                "concaluit cor meum intra me, et in meditatione mea exarsit ignis\n",
+                encoding="utf-8",
+            )
             base = load_config()
             data = copy.deepcopy(base.data)
+            data["source"]["books"] = {"1": str(source_file)}
             data["paths"]["artifacts"] = str(root / "artifacts")
+            data["paths"]["cache"] = str(root / "cache")
+            data["paths"]["concordance"] = str(root / "concordance.jsonl")
+            data["paths"]["retrieval_index"] = str(root / "retrieval-index.json")
             data["paths"]["challenge_set"] = str(challenge_set)
             data["paths"]["challenge_results"] = str(root / "results.jsonl")
             config = PipelineConfig(path=base.path, root=base.root, data=data)
+            build_concordance(config, backend=ChallengeLexicon(), include_lemmas=False)
+            build_retrieval_index(config)
             provider = StagedChallengeProvider()
 
             first = run_challenges(
@@ -167,7 +180,7 @@ class ChallengePipelineTest(unittest.TestCase):
                 provider=provider,
                 full_pipeline=True,
             )
-            self.assertEqual(first[0]["pipeline_status"], "corrected")
+            self.assertEqual(first[0]["pipeline_status"], "human_review")
             self.assertEqual(
                 first[0]["candidate_injected_into"], ["witness_a", "witness_b"]
             )

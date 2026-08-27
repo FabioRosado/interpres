@@ -9,11 +9,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from jerome_pipeline.cache import StageCache, canonical_digest
-from jerome_pipeline.config import PipelineConfig, load_config
-from jerome_pipeline.pipeline import STAGE_ORDER
-from jerome_pipeline.review import ReviewRepository, build_review_view
-from jerome_pipeline.review_server import start_review_server
+from interpres.cache import StageCache, canonical_digest
+from interpres.config import PipelineConfig, load_config
+from interpres.review import ReviewRepository, build_review_view
+from interpres.review_server import start_review_server
 
 
 def record(
@@ -940,14 +939,91 @@ class ReviewRepositoryTest(unittest.TestCase):
                 running.stop()
 
 
+class ProjectAwareReviewRegressionTest(unittest.TestCase):
+    """Regression test for project-aware review path.
+
+    Verifies that the jerome-ezekiel project, when loaded through the new
+    project-aware CLI path, can access cached pipeline data. The project
+    config must point to the same cache directory as the root config
+    (.cache/jerome) to preserve compatibility with existing cached artifacts,
+    since their semantic identity (pipeline_version, schema_version,
+    prompt_version, model specs) has not changed.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root_config = load_config("pipeline.yaml")
+        cls.project_config = load_config("projects/jerome-ezekiel/pipeline.yaml")
+
+    def test_project_config_loads_correctly(self):
+        self.assertEqual(self.project_config.pipeline_version, "5.0.0-evidence-first")
+        self.assertEqual(self.project_config.schema_version, 1)
+        self.assertEqual(self.project_config.prompt_version, "2026-08-25.4")
+        expected_cache = Path("C:/Users/FabioRosado/Desktop/translation/.cache/jerome").resolve()
+        expected_artifacts = Path("C:/Users/FabioRosado/Desktop/translation/artifacts").resolve()
+        self.assertEqual(self.project_config.path_value("cache").resolve(), expected_cache)
+        self.assertEqual(self.project_config.path_value("artifacts").resolve(), expected_artifacts)
+
+    def test_both_configs_use_same_cache_directory(self):
+        """Both root and project configs must resolve to the same cache
+        directory to share existing cached artifacts."""
+        root_cache = self.root_config.path_value("cache").resolve()
+        project_cache = self.project_config.path_value("cache").resolve()
+        self.assertEqual(root_cache, project_cache)
+
+    def test_both_configs_share_same_pipeline_identity(self):
+        """Semantic identity (pipeline_version, schema_version, prompt_version, models)
+        is identical, so cache keys are compatible."""
+        self.assertEqual(
+            self.root_config.pipeline_version, self.project_config.pipeline_version
+        )
+        self.assertEqual(
+            self.root_config.schema_version, self.project_config.schema_version
+        )
+        self.assertEqual(
+            self.root_config.prompt_version, self.project_config.prompt_version
+        )
+        for role in [
+            "witness_a",
+            "witness_b",
+            "structural_parser",
+            "prosecutor",
+            "adjudicator",
+        ]:
+            root_model = self.root_config.model(role)
+            project_model = self.project_config.model(role)
+            self.assertEqual(root_model.provider, project_model.provider)
+            self.assertEqual(root_model.model, project_model.model)
+            self.assertEqual(root_model.temperature, project_model.temperature)
+
+    def test_project_aware_path_exposes_existing_lineage(self):
+        """The project-aware path must expose chunks with active lineage
+        from the shared Jerome cache."""
+        repo = ReviewRepository(self.project_config, book=1, profile="production")
+        overview = repo.list_chunks()
+        chunks_with_lineage = [
+            c for c in overview["chunks"] if c.get("witness_quorum") is not None
+        ]
+        self.assertGreater(
+            len(chunks_with_lineage),
+            0,
+            "Project-aware path should expose at least one chunk with lineage",
+        )
+        for chunk in chunks_with_lineage:
+            view = repo.get_chunk(chunk["chunk_id"])
+            self.assertTrue(view["witness_quorum"]["recorded"])
+            self.assertIn(view["witness_quorum"]["mode"], ("normal", "degraded"))
+            self.assertGreater(len(view["run_details"]), 0)
+
+
 class ReviewerUISelectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        cls.app_js = (root / "jerome_pipeline" / "reviewer_ui" / "app.js").read_text(
+        cls.app_js = (root / "interpres" / "reviewer_ui" / "app.js").read_text(
             encoding="utf-8"
         )
-        cls.css = (root / "jerome_pipeline" / "reviewer_ui" / "styles.css").read_text(
+        cls.css = (root / "interpres" / "reviewer_ui" / "styles.css").read_text(
             encoding="utf-8"
         )
 

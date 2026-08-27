@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from jerome_pipeline.challenge import apply_mutation
-from jerome_pipeline.checks import run_deterministic_checks, run_final_draft_checks
+from interpres.challenge import apply_mutation
+from interpres.checks import run_deterministic_checks, run_final_draft_checks
 
 
 class ChecksTest(unittest.TestCase):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from jerome_pipeline.reports import compare_legacy
+from interpres.reports import compare_legacy
 
 
 class LegacyComparisonReportTest(unittest.TestCase):

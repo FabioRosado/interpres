@@ -5,8 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jerome_pipeline.cache import StageCache, stage_record, utc_now
-from jerome_pipeline.schemas import (
+from interpres.cache import StageCache, stage_record, utc_now
+from interpres.schemas import (
+    PROSECUTOR_CHALLENGE_TYPES,
     SchemaValidationError,
     adjudication_schema,
     expand_adjudication_wire,
@@ -16,9 +17,6 @@ from jerome_pipeline.schemas import (
     validate_adjudication,
     validate_evidence_request,
     validate_prosecutor,
-    MAX_PROSECUTOR_CHALLENGES,
-    PROSECUTOR_CHALLENGE_TYPES,
-    PROSECUTOR_WITNESS_TARGETS,
 )
 
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jerome_pipeline.config import ConfigurationError, load_config, load_env_file
+from interpres.config import ConfigurationError, load_config, load_env_file
 
 
 class DotenvTest(unittest.TestCase):

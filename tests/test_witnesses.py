@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import unittest
 
-from jerome_pipeline.prompts import witness_prompt
-from jerome_pipeline.witnesses import (
+from interpres.prompts import witness_prompt
+from interpres.witnesses import (
+    estimate_witness_output_budget,
     parse_plain_witness_proposal,
     parse_witness_proposal,
-    estimate_witness_output_budget,
     validate_witness_record,
     witness_contract_schema,
     witness_gate_receipt,

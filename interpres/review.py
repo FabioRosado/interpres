@@ -4,16 +4,16 @@ import difflib
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .cache import StageCache
 from .config import PipelineConfig
 from .editorial import EditorialRevisionStore, text_digest
 from .pipeline import STAGE_ORDER, active_dependency_lineage
-
 
 REVIEW_SCHEMA_VERSION = "jerome-review-v2"
 

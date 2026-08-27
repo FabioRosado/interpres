@@ -4,11 +4,11 @@ import hashlib
 import json
 import re
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .config import PipelineConfig
-
 
 BOOK_HEADING_RE = re.compile(r"^\s*LIBER\s+([A-Z]+)\.?\s*$", re.IGNORECASE)
 PAGE_RE = re.compile(r"-*\[page\s+([0-9]+[A-D])\]-*", re.IGNORECASE)

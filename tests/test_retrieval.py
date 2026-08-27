@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jerome_pipeline.config import PipelineConfig
-from jerome_pipeline.evidence import EvidenceService
-from jerome_pipeline.retrieval import (
+from interpres.config import PipelineConfig
+from interpres.evidence import EvidenceService
+from interpres.retrieval import (
     INDEX_METHOD,
     LocalRetrievalIndex,
     build_local_retrieval_index,

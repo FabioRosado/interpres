@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from jerome_pipeline.source import make_chunks, parse_source
-
+from interpres.source import make_chunks, parse_source
 
 FIXTURE = """Download header
 LIBER PRIMUS.

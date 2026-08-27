@@ -6,8 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jerome_pipeline.cache import canonical_digest
-from jerome_pipeline.evidence import (
+from interpres.cache import canonical_digest
+from interpres.config import PipelineConfig, load_config
+from interpres.evidence import (
     AuthorityIndex,
     EvidenceService,
     JeromeConcordance,
@@ -18,7 +19,6 @@ from jerome_pipeline.evidence import (
     canonical_source_manifest,
     normalize_latin,
 )
-from jerome_pipeline.config import PipelineConfig, load_config
 
 
 class FreshnessLexicon:

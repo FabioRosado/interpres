@@ -2,25 +2,23 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from glossary import MorphologicalCandidate, Sense, WordAnalysis
-
-from jerome_pipeline.cache import canonical_digest, stage_record, utc_now
-from jerome_pipeline.config import PipelineConfig, load_config
-from jerome_pipeline.evidence import build_concordance, build_retrieval_index
-from jerome_pipeline.pipeline import EvidenceFirstPipeline
-from jerome_pipeline.prompts import (
+from interpres.cache import canonical_digest, stage_record, utc_now
+from interpres.config import PipelineConfig, load_config
+from interpres.evidence import build_concordance, build_retrieval_index
+from interpres.pipeline import EvidenceFirstPipeline
+from interpres.prompts import (
     adjudicator_prompt,
     budgeted_adjudicator_prompt,
     budgeted_prosecutor_prompt,
     prosecutor_prompt,
 )
-from jerome_pipeline.providers import ProviderResponse
-from jerome_pipeline.schemas import adjudication_schema
+from interpres.providers import ProviderResponse
+from interpres.schemas import adjudication_schema
 
 
 class FakeLexicon:

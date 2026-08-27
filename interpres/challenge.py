@@ -15,7 +15,6 @@ from .pipeline import EvidenceFirstPipeline
 from .providers import ModelProvider, ProviderCallError, ProviderResponse
 from .schemas import parse_json_response
 
-
 CHALLENGE_ERROR_TYPES = {
     "negation",
     "subject_object",
@@ -296,7 +295,7 @@ def run_challenges(
         reviewer_error = None
         pipeline_result: dict[str, Any] | None = None
         pipeline_stage_detections: dict[str, list[str]] = {}
-        first_detected = {error: "deterministic" for error in deterministic}
+        first_detected = dict.fromkeys(deterministic, "deterministic")
         if full_pipeline:
             challenge_config = _challenge_pipeline_config(config)
             challenge_provider = ChallengeCandidateProvider(

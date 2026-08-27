@@ -6,7 +6,7 @@ opening cache JSON manually or altering any model output.
 ## Start it
 
 ```powershell
-python translate_book_v4_1.py review --book 1
+interpres review --book 1
 ```
 
 The default address is `http://127.0.0.1:8765/`. Use `--no-browser` to start
@@ -105,7 +105,7 @@ exists.
 ## Tests
 
 ```powershell
-conda run -n jerome python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 Regression coverage includes append-only file creation, prior-file and

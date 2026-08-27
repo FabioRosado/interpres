@@ -10,7 +10,6 @@ from typing import Any
 
 from .cache import canonical_digest, utc_now
 
-
 INDEX_VERSION = 1
 INDEX_METHOD = "latin_tfidf_lsa_v1"
 

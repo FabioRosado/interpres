@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 SUPPORTING_EVIDENCE_CLASSES = {"verified_evidence", "retrieved_evidence"}
 SUPPORTING_EVIDENCE_KINDS = {
     "jerome_phrase",

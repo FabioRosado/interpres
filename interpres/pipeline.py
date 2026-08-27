@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -13,8 +14,8 @@ from glossary import (
     flags_to_json,
 )
 
-from .cache import StageCache, canonical_digest, stage_record, utc_now
 from .adjudication import assess_adjudication_evidence
+from .cache import StageCache, canonical_digest, stage_record, utc_now
 from .checks import (
     CHECKS_VERSION,
     FINAL_CHECKS_VERSION,
@@ -22,15 +23,14 @@ from .checks import (
     run_final_draft_checks,
 )
 from .config import ModelSpec, PipelineConfig
-from .evidence import EvidenceService, canonical_source_manifest
 from .editorial import EditorialMemoryIndex
+from .evidence import EvidenceService, canonical_source_manifest
 from .prompts import (
     ADJUDICATOR_INPUT_BUDGET_POLICY_VERSION,
     PROSECUTOR_INPUT_BUDGET_POLICY_VERSION,
     budgeted_adjudicator_prompt,
     budgeted_prosecutor_prompt,
     grounded_prosecutor_prompt,
-    prosecutor_prompt,
     structural_prompt,
     witness_prompt,
 )
@@ -61,7 +61,6 @@ from .witnesses import (
     validate_witness_record,
     witness_gate_receipt,
 )
-
 
 STAGE_ORDER = [
     "morphology",
@@ -278,12 +277,14 @@ class EvidenceFirstPipeline:
         lexicon: WhitakersWordsBackend | None = None,
         provider: ModelProvider | None = None,
         model_profile: str = "production",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.config = config
         self.cache = StageCache(config.path_value("cache"))
         self.lexicon = lexicon or WhitakersWordsBackend()
         self.provider = provider or ModelProvider(config)
         self.model_profile = model_profile
+        self.progress_callback = progress_callback
         self.adjudicator_input_budget = config.section(
             "adjudicator_input_budget"
         )
@@ -304,6 +305,10 @@ class EvidenceFirstPipeline:
         self.editorial_memory = EditorialMemoryIndex(
             config.path_value("editorial_reviews")
         )
+
+    def _progress(self, event: dict[str, Any]) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(event)
 
     @property
     def evidence(self) -> EvidenceService:
@@ -399,6 +404,12 @@ class EvidenceFirstPipeline:
         existing = self.cache.load(stage, chunk["chunk_id"], cache_key)
         if existing and not force:
             if existing.get("status") == "complete":
+                self._progress({
+                    "event": "stage_complete",
+                    "stage": stage,
+                    "chunk_id": chunk["chunk_id"],
+                    "cached": True,
+                })
                 return StageResult(existing, cached=True)
             if not retry_failed:
                 raise StageIncomplete(existing)
@@ -433,7 +444,13 @@ class EvidenceFirstPipeline:
                     self.cache.save(recovered_record, preserve_existing=True)
                     return StageResult(recovered_record, cached=False)
 
-        started = utc_now()
+        started = time.time()
+        self._progress({
+            "event": "stage_start",
+            "stage": stage,
+            "chunk_id": chunk["chunk_id"],
+            "model": model_identity,
+        })
         try:
             output, raw, actual_model, attempts, provenance = operation()
             record = stage_record(
@@ -636,6 +653,14 @@ class EvidenceFirstPipeline:
             )
         record["execution_profile"] = self.model_profile
         self.cache.save(record, preserve_existing=True)
+        self._progress({
+            "event": "stage_complete",
+            "stage": stage,
+            "chunk_id": chunk["chunk_id"],
+            "status": record["status"],
+            "cached": False,
+            "duration_ms": int((time.time() - started) * 1000),
+        })
         if record["status"] != "complete":
             raise StageIncomplete(record)
         return StageResult(record, cached=False)
@@ -1482,6 +1507,12 @@ class EvidenceFirstPipeline:
             raise ValueError(f"Unknown stage {through!r}; choose from {STAGE_ORDER}")
         stop_index = STAGE_ORDER.index(through)
         records: dict[str, dict[str, Any]] = {}
+        self._progress({
+            "event": "chunk_start",
+            "chunk_id": chunk["chunk_id"],
+            "through": through,
+            "profile": self.model_profile,
+        })
 
         def should_run(stage: str) -> bool:
             return STAGE_ORDER.index(stage) <= stop_index
@@ -2179,10 +2210,25 @@ class EvidenceFirstPipeline:
                     retry_failed=retry_failed,
                 )
                 records["finalize"] = result.record
-            return self._summary(chunk, records)
+            summary = self._summary(chunk, records)
+            self._progress({
+                "event": "chunk_complete",
+                "chunk_id": chunk["chunk_id"],
+                "status": summary["status"],
+                "completed_stages": summary["completed_stages"],
+            })
+            return summary
         except StageIncomplete as exc:
             records[exc.record["stage"]] = exc.record
-            return self._summary(chunk, records, incomplete=True, error=str(exc))
+            summary = self._summary(chunk, records, incomplete=True, error=str(exc))
+            self._progress({
+                "event": "chunk_complete",
+                "chunk_id": chunk["chunk_id"],
+                "status": summary["status"],
+                "completed_stages": summary["completed_stages"],
+                "failed_stage": summary["failed_stage"],
+            })
+            return summary
 
     def run_experimental_witness(
         self,

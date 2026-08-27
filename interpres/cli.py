@@ -6,12 +6,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from glossary import WhitakersWordsBackend
+
 from .cache import StageCache, utc_now
 from .challenge import challenge_metrics, load_challenges, run_challenges
 from .config import PipelineConfig, load_config
 from .evidence import EvidenceService, build_concordance, build_retrieval_index
-from glossary import WhitakersWordsBackend
-from .pipeline import EvidenceFirstPipeline, STAGE_ORDER, write_audit_jsonl
+from .pipeline import STAGE_ORDER, EvidenceFirstPipeline, write_audit_jsonl
 from .reports import compare_legacy, load_jsonl
 from .source import load_chunks, preprocess_book
 
@@ -129,37 +130,63 @@ def _failed_chunk_jobs(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="jerome-pipeline", description="Evidence-first, auditable Latin-to-English pipeline for Jerome")
-    parser.add_argument("--config", default="pipeline.yaml", help="Pipeline YAML path")
+    parser = argparse.ArgumentParser(
+        prog="interpres",
+        description="Evidence-first, human-in-the-loop translation pipeline for historical texts.",
+    )
+    parser.add_argument(
+        "--config",
+        default="pipeline.yaml",
+        help="Pipeline YAML path (default: pipeline.yaml)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # ── project commands ──────────────────────────────────────────
+    project = sub.add_parser("project", help="Manage Interpres projects")
+    project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_list = project_sub.add_parser("list", help="List available projects")
+    project_show = project_sub.add_parser("show", help="Show project details")
+    project_show.add_argument("name", nargs="?", default=None, help="Project directory name")
+
+    # ── doctor ────────────────────────────────────────────────────
+    doctor = sub.add_parser("doctor", help="Verify installation and project setup")
+
+    # ── source & retrieval ────────────────────────────────────────
     preprocess = sub.add_parser("preprocess", help="Parse source and write canonical units/chunks")
+    preprocess.add_argument("project", nargs="?", default=None, help="Project directory name (default: auto-detect)")
     preprocess.add_argument("--book", type=int, default=1)
     inspect_chunks = sub.add_parser("inspect-chunks", help="Inspect canonical processing chunks")
+    inspect_chunks.add_argument("project", nargs="?", default=None)
     _add_selection(inspect_chunks)
     inspect_chunks.add_argument("--full", action="store_true")
     concordance = sub.add_parser(
         "build-concordance", help="Build exact/normalized/lemma concordance"
     )
+    concordance.add_argument("project", nargs="?", default=None)
     concordance.add_argument("--book", type=int, action="append", dest="books")
     concordance.add_argument("--no-lemmas", action="store_true")
     retrieval = sub.add_parser(
         "build-retrieval-index",
         help="Build persisted inspectable local Latin retrieval vectors",
     )
+    retrieval.add_argument("project", nargs="?", default=None)
     search_corpus = sub.add_parser(
         "search-corpus", help="Inspect persisted local retrieval results"
     )
+    search_corpus.add_argument("project", nargs="?", default=None)
     search_corpus.add_argument("--query", required=True)
     search_corpus.add_argument("--limit", type=int, default=8)
 
+    # ── pipeline ──────────────────────────────────────────────────
     run = sub.add_parser("run", help="Run selected chunks through a stage or the full pipeline")
+    run.add_argument("project", nargs="?", default=None)
     _add_selection(run)
     run.add_argument("--through", choices=STAGE_ORDER, default="finalize")
     run.add_argument("--force-stage", choices=STAGE_ORDER)
     run.add_argument("--retry-failed", action="store_true")
     run.add_argument("--profile", choices=["production", "smoke"], default="production")
     resume = sub.add_parser("resume", help="Resume selected chunks and retry failed stages")
+    resume.add_argument("project", nargs="?", default=None)
     _add_selection(resume)
     resume.add_argument("--through", choices=STAGE_ORDER, default="finalize")
     resume.add_argument("--force-stage", choices=STAGE_ORDER)
@@ -168,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
         "refinalize",
         help="Reapply local finalization policy to cached adjudication without providers",
     )
+    refinalize.add_argument("project", nargs="?", default=None)
     _add_selection(refinalize)
     refinalize.add_argument(
         "--profile", choices=["production", "smoke"], default="production"
@@ -179,6 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
         "validate-witnesses",
         help="Apply the local witness contract gate to cached responses without providers",
     )
+    validate_witnesses.add_argument("project", nargs="?", default=None)
     _add_selection(validate_witnesses)
     validate_witnesses.add_argument(
         "--profile", choices=["production", "smoke"], default="production"
@@ -188,12 +217,14 @@ def build_parser() -> argparse.ArgumentParser:
         "failed-chunks",
         help="List attempted chunks whose current-source latest stage failed",
     )
+    failed.add_argument("project", nargs="?", default=None)
     failed.add_argument("--book", type=int, default=1)
     failed.add_argument("--profile", choices=["production", "smoke"], default="production")
     resume_failed = sub.add_parser(
         "resume-failed",
         help="Resume only the current snapshot of failed attempted chunks",
     )
+    resume_failed.add_argument("project", nargs="?", default=None)
     resume_failed.add_argument("--book", type=int, default=1)
     resume_failed.add_argument("--profile", choices=["production", "smoke"], default="production")
     resume_failed.add_argument("--through", choices=STAGE_ORDER, default="finalize")
@@ -204,13 +235,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="List the selected failed chunks without running providers",
     )
 
+    # ── advanced / debug ──────────────────────────────────────────
     benchmark = sub.add_parser("benchmark-witness", help="Run an isolated optional/experimental witness")
+    benchmark.add_argument("project", nargs="?", default=None)
     _add_selection(benchmark)
     benchmark.add_argument("--model-role", default="experimental_translategemma")
     benchmark.add_argument("--force", action="store_true")
     benchmark.add_argument("--retry-failed", action="store_true")
-
     inspect_cache = sub.add_parser("inspect-cache", help="Inspect independently cached stage records")
+    inspect_cache.add_argument("project", nargs="?", default=None)
     inspect_cache.add_argument("--chunk")
     inspect_cache.add_argument("--stage")
     inspect_cache.add_argument("--summary", action="store_true")
@@ -221,14 +254,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect the isolated artifacts/challenge-cache instead",
     )
     inspect_evidence = sub.add_parser("inspect-evidence", help="Inspect requests and retrieved receipts")
+    inspect_evidence.add_argument("project", nargs="?", default=None)
     inspect_evidence.add_argument("--chunk", required=True)
+
+    # ── audit ─────────────────────────────────────────────────────
     flags = sub.add_parser("review-flags", help="List precise human-review/unresolved flags")
+    flags.add_argument("project", nargs="?", default=None)
     flags.add_argument("--book", type=int, default=1)
     export = sub.add_parser("export-audit", help="Export complete per-chunk provenance JSONL")
+    export.add_argument("project", nargs="?", default=None)
     export.add_argument("--book", type=int, default=1)
     export.add_argument("--output")
 
+    # ── compare ───────────────────────────────────────────────────
     compare = sub.add_parser("compare-v4", help="Compare explicit v4/v4.1 artifacts with new audits")
+    compare.add_argument("project", nargs="?", default=None)
     compare.add_argument("--book", type=int, default=1)
     compare.add_argument("--audit")
     compare.add_argument("--qwen")
@@ -237,7 +277,9 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--review")
     compare.add_argument("--output")
 
+    # ── challenges ────────────────────────────────────────────────
     challenge = sub.add_parser("challenge", help="Run/report the blinded project challenge set")
+    challenge.add_argument("project", nargs="?", default=None)
     challenge_sub = challenge.add_subparsers(dest="challenge_command", required=True)
     challenge_inspect = challenge_sub.add_parser("inspect", help="Show challenge metadata (never sent as model labels)")
     challenge_inspect.add_argument("--case")
@@ -251,17 +293,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     challenge_sub.add_parser("report", help="Report most recent challenge metrics")
 
+    # ── editorial ─────────────────────────────────────────────────
     editorial = sub.add_parser("record-editorial", help="Append a versioned editorial/review decision")
+    editorial.add_argument("project", nargs="?", default=None)
     editorial.add_argument("--kind", choices=["decision", "human_review", "resolution"], required=True)
     editorial.add_argument("--source-unit", action="append", required=True)
     editorial.add_argument("--issue", required=True)
     editorial.add_argument("--decision")
     editorial.add_argument("--supersedes")
     inspect_editorial = sub.add_parser("inspect-editorial", help="Inspect append-only editorial records")
+    inspect_editorial.add_argument("project", nargs="?", default=None)
     inspect_editorial.add_argument("--kind", choices=["decision", "human_review", "resolution"])
+
+    # ── review ────────────────────────────────────────────────────
     review = sub.add_parser(
         "review", help="Open the local append-only editorial workspace"
     )
+    review.add_argument("project", nargs="?", default=None)
     review.add_argument("--book", type=int, default=1)
     review.add_argument("--profile", choices=["production", "smoke"], default="production")
     review.add_argument("--host", default="127.0.0.1")
@@ -274,13 +322,57 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _pipeline(config: PipelineConfig) -> EvidenceFirstPipeline:
-    return EvidenceFirstPipeline(config)
+def _resolve_project(args: argparse.Namespace) -> str | None:
+    project = getattr(args, "project", None)
+    if project:
+        return project
+    return None
+
+
+def _load_config(args: argparse.Namespace) -> PipelineConfig:
+    project = _resolve_project(args)
+    config_path = Path(args.config).resolve()
+    if project:
+        project_cfg = config_path.parent / "projects" / project / "pipeline.yaml"
+        if project_cfg.exists():
+            config_path = project_cfg
+    return load_config(config_path)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = load_config(args.config)
+    config = _load_config(args)
+    if args.command == "project":
+        if args.project_command == "list":
+            projects_dir = config.path_value("artifacts").parent / "projects"
+            if not projects_dir.exists():
+                _json({"projects": []})
+                return 0
+            projects = []
+            for entry in sorted(projects_dir.iterdir()):
+                if entry.is_dir() and (entry / "pipeline.yaml").exists():
+                    projects.append({
+                        "name": entry.name,
+                        "path": str(entry),
+                        "has_challenges": (entry / "challenges").exists(),
+                        "has_editorial": (entry / "editorial").exists(),
+                    })
+            _json({"projects": projects})
+            return 0
+        if args.project_command == "show":
+            project_dir = config.path_value("artifacts").parent / "projects" / (args.name or "jerome-ezekiel")
+            if not project_dir.exists():
+                raise SystemExit(f"Project not found: {args.name}")
+            info = {"name": args.name or "jerome-ezekiel", "path": str(project_dir)}
+            for filename in ("README.md", "pipeline.yaml", "project.yaml"):
+                path = project_dir / filename
+                if path.exists():
+                    info[filename] = str(path)
+            _json(info)
+            return 0
+    if args.command == "doctor":
+        from .doctor import run_doctor
+        return run_doctor(config)
     if args.command == "review":
         from .review_server import serve_review
 
@@ -312,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         _json(build_retrieval_index(config))
         return 0
     if args.command == "search-corpus":
-        pipeline = _pipeline(config)
+        pipeline = EvidenceFirstPipeline(config)
         if pipeline.evidence.retrieval is None:
             _json(
                 {
@@ -332,7 +424,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command in {"run", "resume"}:
-        # Auto-rebuild stale concordance/retrieval index if needed
         try:
             EvidenceService.from_config(config, WhitakersWordsBackend())
         except ValueError as e:
@@ -345,11 +436,41 @@ def main(argv: list[str] | None = None) -> int:
                 raise
 
         chunks = _select_chunks(load_chunks(config, args.book), args)
-        pipeline = EvidenceFirstPipeline(config, model_profile=args.profile)
+        
+        def progress_handler(event: dict[str, Any]) -> None:
+            ev = event.get("event")
+            if ev == "chunk_start":
+                print(
+                    f"\n[{event.get('chunk_id')}] starting through={event.get('through')} profile={event.get('profile')}",
+                    flush=True,
+                )
+            elif ev == "stage_start":
+                stage = event.get("stage")
+                model = event.get("model") or {}
+                provider = model.get("provider", "local")
+                model_name = model.get("model", "?")
+                print(f"  -> {stage} [{provider}/{model_name}]", flush=True)
+            elif ev == "stage_complete":
+                stage = event.get("stage")
+                status = event.get("status")
+                cached = event.get("cached")
+                duration = event.get("duration_ms")
+                tag = "cached" if cached else f"{duration}ms"
+                print(f"  <- {stage} [{status}] ({tag})", flush=True)
+            elif ev == "chunk_complete":
+                print(
+                    f"[{event.get('chunk_id')}] finished status={event.get('status')} stages={','.join(event.get('completed_stages', []))}",
+                    flush=True,
+                )
+        
+        pipeline = EvidenceFirstPipeline(
+            config,
+            model_profile=args.profile,
+            progress_callback=progress_handler,
+        )
         retry = bool(getattr(args, "retry_failed", False) or args.command == "resume")
         overall = []
         for index, chunk in enumerate(chunks, 1):
-            print(f"[{index}/{len(chunks)}] {chunk['chunk_id']} through={args.through} profile={args.profile}", flush=True)
             result = pipeline.run_chunk(chunk, through=args.through, force_stage=args.force_stage, retry_failed=retry)
             summary = {key: value for key, value in result.items() if key != "records"}
             overall.append(summary)
@@ -382,9 +503,6 @@ def main(argv: list[str] | None = None) -> int:
             result = pipeline.validate_cached_witnesses(chunk, force=args.force)
             results.append(result)
             _json(result)
-        # A single-valid quorum is a deliberate safe degraded path, not a
-        # validation command failure. Only a blocked both-invalid quorum should
-        # produce a non-zero exit code.
         return 1 if any(item.get("status") == "both_invalid" for item in results) else 0
     if args.command == "failed-chunks":
         _json(_failed_chunk_jobs(config, args.book, args.profile))
@@ -420,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if any(item["status"] == "incomplete" for item in overall) else 0
     if args.command == "benchmark-witness":
         chunks = _select_chunks(load_chunks(config, args.book), args)
-        pipeline = _pipeline(config)
+        pipeline = EvidenceFirstPipeline(config)
         results = [
             pipeline.run_experimental_witness(
                 chunk,
@@ -447,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
         cache = (
             StageCache(config.path_value("artifacts") / "challenge-cache")
             if args.challenge
-            else _pipeline(config).cache
+            else EvidenceFirstPipeline(config).cache
         )
         records = cache.inspect(
             chunk_id=args.chunk,
@@ -459,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
         _json(records)
         return 0
     if args.command == "inspect-evidence":
-        records = _pipeline(config).cache.inspect(chunk_id=args.chunk)
+        records = EvidenceFirstPipeline(config).cache.inspect(chunk_id=args.chunk)
         evidence = []
         for item in records:
             if item.get("stage") in {"research_prosecutor", "research_adjudicator"}:
@@ -470,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command in {"review-flags", "export-audit"}:
         chunks = load_chunks(config, args.book)
-        pipeline = _pipeline(config)
+        pipeline = EvidenceFirstPipeline(config)
         audits = [pipeline.assemble_audit(chunk) for chunk in chunks]
         if args.command == "review-flags":
             _json([{"chunk_id": audit["chunk_id"], "final_status": audit["final_status"], "human_review_requests": audit["human_review_requests"], "unresolved_issues": audit["unresolved_issues"]} for audit in audits if audit["final_status"] in {"human_review", "unresolved", "incomplete"} or audit["human_review_requests"] or audit["unresolved_issues"]])
@@ -484,7 +602,7 @@ def main(argv: list[str] | None = None) -> int:
         if audit_path.exists():
             audits = load_jsonl(audit_path)
         else:
-            pipeline = _pipeline(config)
+            pipeline = EvidenceFirstPipeline(config)
             audits = [pipeline.assemble_audit(chunk) for chunk in load_chunks(config, args.book)]
         report = compare_legacy(audits, qwen_path=Path(args.qwen).resolve() if args.qwen else None, mistral_path=Path(args.mistral).resolve() if args.mistral else None, prosecutor_path=Path(args.prosecutor).resolve() if args.prosecutor else None, review_path=Path(args.review).resolve() if args.review else None)
         if args.output:

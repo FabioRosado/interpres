@@ -3,9 +3,10 @@ from __future__ import annotations
 import copy
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
@@ -77,7 +78,7 @@ class ModelSpec:
     max_output_tokens: int = 1600
     thinking: bool = False
     retries: int = 1
-    fallback: "ModelSpec | None" = None
+    fallback: ModelSpec | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def cache_identity(self) -> dict[str, Any]:

@@ -1,0 +1,15 @@
+project:
+  name: jerome-ezekiel
+  description: "St Jerome's Commentaria in Ezechielem (Books I-XIV)"
+  author: "Hieronymus Stridonensis"
+  work: "Commentaria in Ezechielem"
+  corpus: "Patrologia Latina (Corpus 2)"
+  cc_idno: 21347
+  cc_id: "cps_2.HieStr.CoInEz"
+  permalink: "https://mlat.uzh.ch/browser/cps_2.HieStr.CoInEz"
+  source_format: "corpus-corporum"
+  books:
+    "1": "book1.txt"
+  languages:
+    source: "la"
+    target: "en"

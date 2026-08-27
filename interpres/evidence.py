@@ -7,8 +7,9 @@ import math
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Protocol
 
 from glossary import WhitakersWordsBackend, analysis_to_json, tokenize_with_offsets
 
@@ -16,7 +17,6 @@ from .cache import canonical_digest, utc_now
 from .config import PipelineConfig
 from .retrieval import LocalRetrievalIndex, build_local_retrieval_index
 from .source import parse_source, preprocess_book
-
 
 EVIDENCE_SERVICE_VERSION = 3
 CONCORDANCE_VERSION = 2

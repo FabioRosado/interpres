@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from jerome_pipeline.adjudication import assess_adjudication_evidence
+from interpres.adjudication import assess_adjudication_evidence
 
 
 class AdjudicationEvidencePolicyTest(unittest.TestCase):

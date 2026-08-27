@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .cache import canonical_digest, utc_now
 from .evidence import normalize_latin
-
 
 EDITORIAL_REVISION_SCHEMA_VERSION = "jerome-editorial-revision-v1"
 EDITORIAL_MEMORY_POLICY_VERSION = 1
