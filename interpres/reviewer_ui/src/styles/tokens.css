@@ -1,0 +1,50 @@
+/* Design tokens extracted from legacy styles.css */
+:root {
+  --ip-paper: #f1ede3;
+  --ip-surface: #fffdf8;
+  --ip-surface-muted: #f8f4ea;
+  --ip-ink: #20201d;
+  --ip-muted: #69655b;
+  --ip-border: #d7cfbd;
+  --ip-accent: #24375f;
+  --ip-warning: #a76d19;
+  --ip-danger: #a34235;
+  --ip-success: #276248;
+  --ip-prosecutor: #694d7e;
+
+  --ink: var(--ip-ink);
+  --muted: var(--ip-muted);
+  --paper: var(--ip-paper);
+  --panel: var(--ip-surface);
+  --panel-soft: var(--ip-surface-muted);
+  --line: var(--ip-border);
+  --line-strong: #a99f89;
+  --indigo: var(--ip-accent);
+  --indigo-soft: #e7ebf4;
+  --ochre: var(--ip-warning);
+  --ochre-soft: #f6ead2;
+  --green: var(--ip-success);
+  --green-soft: #e4f1e9;
+  --red: var(--ip-danger);
+  --red-soft: #f8e6e2;
+  --violet: var(--ip-prosecutor);
+  --violet-soft: #eee7f4;
+
+  --serif: Georgia, "Times New Roman", serif;
+  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--sans);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/* Web Awesome theme mapping */
+:root {
+  --wa-color-primary: var(--ip-accent);
+  --wa-color-success: var(--ip-success);
+  --wa-color-warning: var(--ip-warning);
+  --wa-color-danger: var(--ip-danger);
+  --wa-color-neutral: var(--ip-muted);
+  --wa-border-radius: 0.4rem;
+  --wa-input-border-color: var(--ip-border);
+  --wa-input-focus-border-color: var(--ip-warning);
+}

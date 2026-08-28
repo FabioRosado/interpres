@@ -155,6 +155,8 @@ def _normalise_finding(
         source_unit_ids = _source_units_for_locator(
             source_units, item.get("latin_locator")
         )
+    explicit_evidence_ids = _list(item.get("evidence_ids"))
+    evidence_ids = explicit_evidence_ids if explicit_evidence_ids else _evidence_ids(item)
     return {
         "finding_id": str(supplied_id)
         if supplied_id
@@ -172,7 +174,8 @@ def _normalise_finding(
         "witness_target": item.get("witness_target")
         or _dict(item.get("evidence")).get("witness"),
         "confidence": item.get("confidence"),
-        "evidence_ids": _evidence_ids(item),
+        "evidence_ids": evidence_ids,
+        "evidence_ids_explicit": bool(explicit_evidence_ids),
         "requires_external_evidence": item.get("requires_external_evidence"),
         "raw": item,
     }
@@ -297,13 +300,32 @@ def _mapping_with_offsets(
 def _mappings_with_offsets(text: Any, mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     cursor = 0
+    precise_chain = True
     for index, mapping in enumerate(mappings):
-        enriched_mapping, next_cursor = _mapping_with_offsets(
-            text, mapping, cursor, is_last=index == len(mappings) - 1
+        enriched_mapping, next_cursor = (
+            _mapping_with_offsets(
+                text, mapping, cursor, is_last=index == len(mappings) - 1
+            )
+            if precise_chain
+            else (None, cursor)
         )
         if enriched_mapping is None:
-            return []
-        enriched.append(enriched_mapping)
+            precise_chain = False
+            enriched.append(
+                {
+                    **mapping,
+                    "mapping_quality": "coarse",
+                    "offset_status": "unavailable",
+                }
+            )
+            continue
+        enriched.append(
+            {
+                **enriched_mapping,
+                "mapping_quality": "precise",
+                "offset_status": "persisted_boundaries_resolved",
+            }
+        )
         cursor = next_cursor
     return enriched
 
@@ -321,7 +343,10 @@ def _final_source_mappings(
         if _dict(mapping).get("source_unit_id")
     ]
     if explicit:
-        return _mappings_with_offsets(final_draft, explicit) or explicit
+        return [
+            {**mapping, "mapping_source": "finalize.output.source_mappings"}
+            for mapping in _mappings_with_offsets(final_draft, explicit)
+        ]
     if base_witness not in {"a", "b"}:
         return []
     witness = witness_a if base_witness == "a" else witness_b
@@ -333,16 +358,53 @@ def _final_source_mappings(
     ]
     for mapping in _mappings_with_offsets(final_draft, witness_mappings):
         source_unit_id = mapping.get("source_unit_id")
-        if not source_unit_id:
+        if not source_unit_id or mapping.get("mapping_quality") != "precise":
             continue
         carried.append(
             {
                 **mapping,
                 "mapping_source": f"base_witness_{base_witness}",
-                "mapping_confidence": "carried_forward_exact_boundary_quotes",
+                "mapping_confidence": (
+                    "carried_forward_exact_boundary_quotes"
+                    if mapping.get("mapping_quality") == "precise"
+                    else "coarse_base_witness_unit_mapping"
+                ),
             }
         )
     return carried
+
+
+def _compute_final_edit_offsets(
+    applied_edits: list[dict[str, Any]],
+    base_witness: Any,
+    witness_a: dict[str, Any],
+    witness_b: dict[str, Any],
+    final_draft: str,
+) -> list[dict[str, Any]]:
+    """Expose final offsets only when persisted edit wording has one exact final match."""
+    base_text = (
+        witness_a.get("translation")
+        if base_witness == "a"
+        else witness_b.get("translation") if base_witness == "b" else None
+    )
+    if not isinstance(base_text, str) or not isinstance(final_draft, str):
+        return applied_edits
+    enriched = []
+    for edit in applied_edits:
+        replacement = edit.get("new")
+        if isinstance(replacement, str) and replacement and final_draft.count(replacement) == 1:
+            final_start = final_draft.index(replacement)
+            enriched.append(
+                {
+                    **edit,
+                    "final_start_offset": final_start,
+                    "final_end_offset": final_start + len(replacement),
+                    "final_mapping_quality": "precise_unique_replacement",
+                }
+            )
+        else:
+            enriched.append({**edit, "final_mapping_quality": "unavailable"})
+    return enriched
 
 
 def _normalise_prosecutor_stage(
@@ -651,8 +713,10 @@ def build_review_view(
     final_record = records.get("finalize")
     final_state = _stage_state(final_record)
     final_output = _dict(_dict(final_record).get("output"))
+    final_draft = final_output.get("final_draft") or audit.get("final_draft")
     decision = _dict(final_output.get("decision")) or adjudicator_output
     coverage = _dict(decision.get("coverage"))
+    base_witness = coverage.get("base_witness")
     applied_edits = []
     for index, raw in enumerate(_list(coverage.get("applied_edits")), 1):
         edit = _dict(raw)
@@ -676,6 +740,9 @@ def build_review_view(
                 "end_before": edit.get("end_before"),
             }
         )
+    applied_edits = _compute_final_edit_offsets(
+        applied_edits, base_witness, witness_a, witness_b, final_draft
+    )
     adjudicator_findings = [
         _normalise_finding(
             item,
@@ -713,7 +780,6 @@ def build_review_view(
             }
         )
 
-    final_draft = final_output.get("final_draft") or audit.get("final_draft")
     final_status = final_output.get("final_status") or audit.get("final_status")
     if final_status not in {
         "accepted",
@@ -728,7 +794,6 @@ def build_review_view(
     if not final_checks:
         final_checks = _dict(_dict(final_output.get("decision")).get("final_checks"))
 
-    base_witness = coverage.get("base_witness")
     base_text = (
         witness_a.get("translation")
         if base_witness == "a"
@@ -861,6 +926,25 @@ def build_review_view(
         "note": "The reviewer UI highlights only these persisted relationships; absent alignments are shown as missing rather than inferred.",
     }
 
+    audit_lineage = _dict(audit.get("audit_lineage"))
+    active_artifact_ids = {
+        str(record.get("cache_key"))
+        for record in records.values()
+        if record.get("cache_key")
+    }
+    stage_history = [
+        {
+            "stage": item.get("stage"),
+            "status": item.get("status"),
+            "artifact_id": item.get("cache_key"),
+            "started_at": item.get("started_at"),
+            "finished_at": item.get("finished_at"),
+            "input_digest": item.get("input_digest"),
+            "is_active": str(item.get("cache_key")) in active_artifact_ids,
+        }
+        for item in history
+    ]
+
     return {
         "review_schema_version": REVIEW_SCHEMA_VERSION,
         "chunk": {
@@ -918,6 +1002,13 @@ def build_review_view(
             "note": "Issue records are linked to persisted findings; no cross-stage equivalence is inferred.",
         },
         "review_links": review_links,
+        "lineage": {
+            **audit_lineage,
+            "historical_record_count": sum(
+                1 for item in stage_history if not item["is_active"]
+            ),
+        },
+        "stage_history": stage_history,
         "witnesses": [witness_a, witness_b],
         "disagreements": {
             "available": disagreement_recorded,

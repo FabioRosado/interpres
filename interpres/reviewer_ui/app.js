@@ -1,259 +1,39 @@
 "use strict";
 
-const state = {
-  overview: null,
-  view: null,
-  currentChunkId: null,
-  selectedUnit: null,
-  selectedReviewTarget: null,
-  issueFilter: "open",
-  reviewMode: "review",
-  layers: {
-    deterministic: true,
-    witness_disagreement: true,
-    prosecutor: true,
-    adjudicator: true,
-    adjudicator_edit: true,
-    unresolved: true,
-    human_review: true,
-    verification: true,
-    source_mapping: true,
-  },
-  reviewIndex: null,
-  resolutions: new Map(),
-  dirty: false,
-  saving: false,
-};
-
-const LAYER_LABELS = {
-  deterministic: "Deterministic",
-  witness_disagreement: "Disagreements",
-  prosecutor: "Prosecutor",
-  adjudicator: "Adjudicator findings",
-  adjudicator_edit: "Adjudicator edits",
-  unresolved: "Unresolved",
-  human_review: "Human review",
-  verification: "Verification",
-  source_mapping: "Source mappings",
-};
-
-const $ = (selector) => document.querySelector(selector);
-const $$ = (selector) => Array.from(document.querySelectorAll(selector));
-
-function node(tag, options = {}, children = []) {
-  const element = document.createElement(tag);
-  if (options.className) element.className = options.className;
-  if (options.text !== undefined && options.text !== null) element.textContent = String(options.text);
-  if (options.title) element.title = options.title;
-  for (const [key, value] of Object.entries(options.attrs || {})) {
-    if (value !== undefined && value !== null) element.setAttribute(key, String(value));
-  }
-  for (const [key, value] of Object.entries(options.dataset || {})) element.dataset[key] = String(value);
-  for (const child of children) if (child !== null && child !== undefined) element.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  return element;
-}
-
-function clear(element) { element.replaceChildren(); return element; }
-function stringify(value) { return JSON.stringify(value, null, 2); }
-function humanize(value) {
-  if (value === null || value === undefined || value === "") return "Not recorded";
-  return String(value).replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-function statusClass(value) { return String(value || "incomplete").toLowerCase().replaceAll(" ", "_"); }
-function compactId(value) {
-  if (!value) return "—";
-  const text = String(value);
-  return text.length > 18 ? `${text.slice(0, 10)}…${text.slice(-6)}` : text;
-}
-function emptyState(message, stateName = null) {
-  return node("div", { className: "empty-state", text: stateName ? `${humanize(stateName)} · ${message}` : message });
-}
-function pill(text, className = "type-pill") { return node("span", { className, text: humanize(text) }); }
-function relatedDataset(ids) { return { unitIds: (ids || []).join(" ") }; }
-
-function unique(values) { return Array.from(new Set((values || []).filter(Boolean).map(String))); }
-function containsAny(left, right) {
-  const rightSet = new Set(right || []);
-  return (left || []).some((item) => rightSet.has(item));
-}
-function primaryId(record) {
-  return record?.issue_id || record?.finding_id || record?.request_id || record?.edit_id || record?.evidence_id || record?.flag_id || record?.entry_id || null;
-}
-function normalizedText(value) { return String(value || "").replace(/\s+/g, " ").trim(); }
-function findQuoteRange(text, quote, from = 0) {
-  const source = String(text || "");
-  const needle = String(quote || "").trim();
-  if (!source || !needle) return null;
-  const direct = source.indexOf(needle, from);
-  if (direct >= 0) return { start: direct, end: direct + needle.length };
-  const compactNeedle = normalizedText(needle);
-  if (!compactNeedle) return null;
-  const compactSource = normalizedText(source);
-  const compactIndex = compactSource.indexOf(compactNeedle);
-  if (compactIndex < 0) return null;
-  return null;
-}
-
-async function requestJson(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { Accept: "application/json", ...(options.headers || {}) },
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const error = new Error(payload?.message || payload?.error || `Request failed (${response.status})`);
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
-}
-
-function annotationRecord({ id, type, layer, sourceUnitIds = [], findingIds = [], evidenceIds = [], editIds = [], issueIds = [], textQuote = null, startQuote = null, endQuote = null, replacementQuote = null, label = null, decisionTrailId = null, raw = null }) {
-  return {
-    id,
-    type,
-    layer,
-    sourceUnitIds: unique(sourceUnitIds),
-    findingIds: unique(findingIds),
-    evidenceIds: unique(evidenceIds),
-    editIds: unique(editIds),
-    issueIds: unique(issueIds),
-    textQuote,
-    startQuote,
-    endQuote,
-    replacementQuote,
-    label,
-    decisionTrailId,
-    raw,
-  };
-}
-
-function buildReviewIndex(view) {
-  const annotations = [];
-  const byIssue = new Map();
-  const byUnit = new Map();
-  const byEdit = new Map();
-  const add = (record) => {
-    annotations.push(record);
-    for (const id of record.issueIds) byIssue.set(id, record);
-    for (const id of record.sourceUnitIds) byUnit.set(id, [...(byUnit.get(id) || []), record]);
-    for (const id of record.editIds) byEdit.set(id, record);
-  };
-
-  for (const issue of view.issues?.items || []) {
-    const id = issue.issue_id;
-    const layer = issue.origin === "adjudicator" ? "adjudicator" : issue.origin;
-    const quote = issue.english && typeof issue.english === "string" && !issue.english.startsWith("witness_") ? issue.english : null;
-    const trail = issue.origin === "deterministic" ? "decision-challenges"
-      : issue.origin === "prosecutor" ? "decision-challenges"
-      : issue.origin === "adjudicator" || issue.origin === "unresolved" || issue.origin === "human_review" ? "decision-adjudicator"
-      : issue.origin === "witness_disagreement" ? "decision-witnesses" : null;
-    add(annotationRecord({
-      id,
-      type: "issue",
-      layer,
-      sourceUnitIds: issue.source_unit_ids,
-      findingIds: [issue.source_record_id],
-      evidenceIds: issue.evidence_ids,
-      issueIds: [id],
-      textQuote: quote,
-      label: issue.message || issue.type || issue.origin,
-      decisionTrailId: trail,
-      raw: issue,
-    }));
-  }
-
-  for (const edit of view.adjudicator?.edits || []) {
-    const id = edit.edit_id;
-    add(annotationRecord({
-      id,
-      type: "adjudicator_edit",
-      layer: "adjudicator_edit",
-      sourceUnitIds: edit.source_unit_ids,
-      editIds: [id],
-      evidenceIds: edit.evidence_ids,
-      textQuote: edit.old,
-      replacementQuote: edit.new,
-      label: edit.reason || "Adjudicator edit",
-      decisionTrailId: "decision-adjudicator",
-      raw: edit,
-    }));
-  }
-
-  for (const unit of view.source?.units || []) {
-    const mapping = mappingForUnit(unit.source_unit_id, view.final?.source_mappings || []);
-    const quote = mappingQuote(mapping);
-    if (!quote) continue;
-    add(annotationRecord({
-      id: `source-map:${unit.source_unit_id}`,
-      type: "source_mapping",
-      layer: "source_mapping",
-      sourceUnitIds: [unit.source_unit_id],
-      textQuote: quote,
-      label: `${unit.source_unit_id} final source mapping`,
-      decisionTrailId: "decision-final",
-      raw: mapping,
-    }));
-  }
-
-  for (const item of view.verification?.incomplete_stages || []) {
-    if (item.state === "complete") continue;
-    add(annotationRecord({
-      id: `verification:${item.stage}`,
-      type: "verification",
-      layer: "verification",
-      sourceUnitIds: view.source?.units?.map((unit) => unit.source_unit_id),
-      label: `${humanize(item.stage)} is ${humanize(item.state)}`,
-      decisionTrailId: "decision-verification",
-      raw: item,
-    }));
-  }
-
-  const missingUnits = view.verification?.missing_source_unit_ids || [];
-  for (const unitId of missingUnits) {
-    add(annotationRecord({
-      id: `coverage:${unitId}`,
-      type: "verification",
-      layer: "verification",
-      sourceUnitIds: [unitId],
-      label: "Coverage missing for this source unit",
-      decisionTrailId: "decision-verification",
-      raw: { source_unit_id: unitId },
-    }));
-  }
-
-  return { annotations, byIssue, byUnit, byEdit };
-}
-
-function mappingForUnit(unitId, mappings = []) {
-  return (mappings || []).find((mapping) => String(mapping.source_unit_id || "") === String(unitId));
-}
-
-function mappingQuote(mapping) {
-  if (!mapping) return null;
-  return mapping.english_start_quote || mapping.english_quote || mapping.text || mapping.translation || null;
-}
-
-function annotationRange(text, annotation, options = {}) {
-  const source = String(text || "");
-  if (!source || !annotation) return null;
-  const startOffset = annotation.raw?.english_start_offset;
-  const endOffset = annotation.raw?.english_end_offset;
-  if (Number.isInteger(startOffset) && Number.isInteger(endOffset) && startOffset >= 0 && endOffset > startOffset && endOffset <= source.length) {
-    return { start: startOffset, end: endOffset };
-  }
-  const startQuote = annotation.startQuote || annotation.raw?.english_start_quote;
-  const endQuote = annotation.endQuote || annotation.raw?.english_end_quote;
-  if (startQuote && endQuote) {
-    const start = source.indexOf(String(startQuote));
-    if (start >= 0) {
-      const endStart = source.indexOf(String(endQuote), start);
-      if (endStart >= 0) return { start, end: endStart + String(endQuote).length };
-    }
-  }
-  const quote = options.preferReplacement ? annotation.replacementQuote || annotation.textQuote : annotation.textQuote || annotation.replacementQuote;
-  return findQuoteRange(source, quote);
-}
+import { LAYER_LABELS, state } from "./js/state.js";
+import { requestJson } from "./js/api.js";
+import {
+  $,
+  $$,
+  clear,
+  compactId,
+  containsAny,
+  emptyState,
+  evidenceStatusClass,
+  humanize,
+  node,
+  pill,
+  primaryId,
+  relatedDataset,
+  statusClass,
+  stringify,
+  textDiff,
+  unique,
+} from "./js/dom.js";
+import {
+  annotationRange,
+  annotationRecord,
+  buildReviewIndex as buildNormalizedReviewIndex,
+  mappingForUnit,
+  mappingQuote,
+} from "./js/review-index.js";
+import { renderMarkdown, wrapMarkdownSelection } from "./js/markdown.js";
+import {
+  annotationFromSelection,
+  editorialAnnotationRecord,
+  validateAnnotationSpan,
+} from "./js/editorial-annotations.js";
+import { renderEvidenceInspector } from "./js/evidence-inspector.js";
 
 function showLoading() { $("#loading-panel").hidden = false; $("#review-content").hidden = true; $("#error-panel").hidden = true; }
 function showContent() { $("#loading-panel").hidden = true; $("#review-content").hidden = false; $("#error-panel").hidden = true; }
@@ -262,6 +42,94 @@ function showError(error) {
   $("#review-content").hidden = true;
   $("#error-panel").hidden = false;
   $("#error-message").textContent = error instanceof Error ? error.message : String(error);
+}
+
+function navigationState() {
+  const url = new URL(location.href);
+  const legacyHash = decodeURIComponent(url.hash.replace(/^#/, ""));
+  return {
+    chunk: url.searchParams.get("chunk") || (legacyHash && !legacyHash.startsWith("decision-") ? legacyHash : null),
+    target: url.searchParams.get("target"),
+    tab: url.searchParams.get("tab") || "source",
+    trail: legacyHash.startsWith("decision-") ? legacyHash : null,
+  };
+}
+
+function updateUrlState({ trail = null } = {}) {
+  const url = new URL(location.href);
+  if (state.currentChunkId) url.searchParams.set("chunk", state.currentChunkId);
+  else url.searchParams.delete("chunk");
+  if (state.selectedReviewTarget?.id) url.searchParams.set("target", state.selectedReviewTarget.id);
+  else url.searchParams.delete("target");
+  url.searchParams.set("tab", state.referenceTab);
+  if (trail) url.hash = trail;
+  else if (url.hash && !url.hash.startsWith("#decision-")) url.hash = "";
+  history.replaceState(null, "", url);
+}
+
+function setReferenceTab(tab, { updateUrl = true } = {}) {
+  state.referenceTab = tab === "machine" ? "machine" : "source";
+  for (const button of $$("[data-reference-tab]")) {
+    const active = button.dataset.referenceTab === state.referenceTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
+  }
+  $("#reference-source").hidden = state.referenceTab !== "source";
+  $("#reference-machine").hidden = state.referenceTab !== "machine";
+  if (updateUrl) updateUrlState();
+  applySelection();
+}
+
+function setEditorMode(mode) {
+  state.editorMode = mode === "preview" ? "preview" : "edit";
+  const preview = state.editorMode === "preview";
+  $("#editor-translation").hidden = preview;
+  $("#markdown-preview").hidden = !preview;
+  $(".markdown-toolbar").hidden = preview;
+  $("#editor-mode-edit").classList.toggle("active", !preview);
+  $("#editor-mode-edit").setAttribute("aria-selected", preview ? "false" : "true");
+  $("#editor-mode-preview").classList.toggle("active", preview);
+  $("#editor-mode-preview").setAttribute("aria-selected", preview ? "true" : "false");
+  if (preview) renderMarkdown($("#markdown-preview"), $("#editor-translation").value);
+}
+
+function setSplitPercent(value) {
+  const percent = Math.max(35, Math.min(65, Number(value) || 48));
+  state.splitPercent = percent;
+  $("#split-workspace").style.setProperty("--reference-width", `${percent}%`);
+  $("#split-handle").setAttribute("aria-valuenow", String(Math.round(percent)));
+  sessionStorage.setItem("interpres:review-split", String(percent));
+}
+
+function initializeSplitPanel() {
+  const workspace = $("#split-workspace");
+  const handle = $("#split-handle");
+  setSplitPercent(sessionStorage.getItem("interpres:review-split") || 48);
+  const resize = (event) => {
+    const bounds = workspace.getBoundingClientRect();
+    setSplitPercent(((event.clientX - bounds.left) / bounds.width) * 100);
+  };
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    workspace.classList.add("is-resizing");
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (handle.hasPointerCapture(event.pointerId)) resize(event);
+  });
+  handle.addEventListener("pointerup", (event) => {
+    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    workspace.classList.remove("is-resizing");
+  });
+  handle.addEventListener("keydown", (event) => {
+    const next = event.key === "Home" ? 35 : event.key === "End" ? 65
+      : event.key === "ArrowLeft" ? state.splitPercent - 2
+      : event.key === "ArrowRight" ? state.splitPercent + 2 : null;
+    if (next === null) return;
+    event.preventDefault();
+    setSplitPercent(next);
+  });
 }
 
 function setDirty(dirty) {
@@ -427,6 +295,26 @@ function selectReviewTarget(target, { scroll = false, focusIssues = false, openD
   state.selectedUnit = target?.sourceUnitIds?.[0] || null;
   refreshSelectedTextSurfaces();
   applySelection({ scroll, focusIssues, openDecisionTrail });
+  if (target) openEvidenceInspector();
+  updateUrlState();
+}
+
+function openEvidenceInspector() {
+  if (!state.selectedReviewTarget) return;
+  const inspector = $("#evidence-inspector");
+  state.evidenceInspectorOpen = true;
+  state.evidenceInspectorMinimized = false;
+  inspector.classList.remove("minimized");
+  $("#minimize-inspector").textContent = "Minimise";
+  $("#minimize-inspector").setAttribute("aria-pressed", "false");
+  renderContextSidebar(state.selectedReviewTarget);
+  if (!inspector.open) inspector.show();
+}
+
+function closeEvidenceInspector() {
+  const inspector = $("#evidence-inspector");
+  state.evidenceInspectorOpen = false;
+  if (inspector.open) inspector.close();
 }
 
 function refreshSelectedTextSurfaces() {
@@ -440,6 +328,7 @@ function applySelection({ scroll = false, focusIssues = false, openDecisionTrail
   const unitId = state.selectedUnit;
   $("#clear-unit").hidden = !target;
   $("#clear-selection").disabled = !target;
+  $("#open-inspector").disabled = !target;
   for (const element of $$(".unit-button")) {
     const active = (target?.sourceUnitIds || []).includes(element.dataset.unitId);
     element.classList.toggle("active", active);
@@ -473,10 +362,17 @@ function applySelection({ scroll = false, focusIssues = false, openDecisionTrail
     if (active) element.open = true;
   }
   for (const element of $$(".annotation")) {
-    const annotation = state.reviewIndex?.annotations.find((item) => item.id === element.dataset.reviewId);
+    const annotation = state.reviewIndex?.annotations.find((item) => item.id === element.dataset.reviewId)
+      || state.annotations.map(editorialAnnotationRecord).find((item) => item.id === element.dataset.reviewId);
     element.classList.toggle("selected", targetMatchesAnnotation(target, annotation));
   }
+  const issueCards = visibleIssueCards();
+  const selectedIssueIndex = issueCards.findIndex((card) => target?.issueIds?.includes(card.dataset.issueId));
+  $("#issue-position").textContent = selectedIssueIndex >= 0
+    ? `Issue ${selectedIssueIndex + 1} of ${issueCards.length}`
+    : target ? humanize(target.type) : "No issue selected";
   renderSelectedContext(target);
+  renderContextSidebar(target);
   if (scroll && target) scrollSelectionIntoView(target, { focusIssues });
   if (openDecisionTrail && target?.decisionTrailId) jumpToDecisionTrail(target.decisionTrailId);
 }
@@ -491,9 +387,19 @@ function scrollSelectionIntoView(target, { focusIssues = false } = {}) {
   }
 }
 
-function jumpToDecisionTrail(sectionId) {
-  const target = sectionId ? document.getElementById(sectionId) : null;
-  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+function jumpToDecisionTrail(sectionId, anchorSelector = null) {
+  const section = sectionId ? document.getElementById(sectionId) : null;
+  if (!section) return;
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+  updateUrlState({ trail: sectionId });
+  if (anchorSelector) {
+    const anchor = section.querySelector(anchorSelector);
+    if (anchor) {
+      anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+      anchor.classList.add("trail-highlight");
+      setTimeout(() => anchor.classList.remove("trail-highlight"), 2000);
+    }
+  }
 }
 
 function renderSelectedContext(target) {
@@ -531,6 +437,9 @@ function renderSelectedContext(target) {
   }
 }
 
+function renderContextSidebar(target) {
+  renderEvidenceInspector(target, jumpToDecisionTrail);
+}
 function visibleIssueCards() {
   return $$(".resolution-card").filter((card) => !card.hidden && card.dataset.issueId);
 }
@@ -638,6 +547,106 @@ function resolutionChanged(issueId, patch) {
   renderResolutionList();
 }
 
+function annotationsForEditorialText() {
+  const editorialRecords = state.annotations
+    .filter((annotation) => validateAnnotationSpan(annotation, $("#editor-translation").value) === "valid")
+    .map(editorialAnnotationRecord);
+  return [...annotationsForMachineText(), ...editorialRecords];
+}
+
+function selectEditorialAnnotation(annotation) {
+  const status = validateAnnotationSpan(annotation, $("#editor-translation").value);
+  selectReviewTarget(targetFromAnnotation(editorialAnnotationRecord({ ...annotation, span_status: status })));
+  if (status !== "valid") return;
+  setEditorMode("edit");
+  const editor = $("#editor-translation");
+  editor.focus();
+  editor.setSelectionRange(annotation.target.start, annotation.target.end);
+  editor.scrollTop = Math.max(0, editor.scrollHeight * annotation.target.start / Math.max(1, editor.value.length) - editor.clientHeight / 2);
+}
+
+function openAnnotationDialog(annotation = null) {
+  const editor = $("#editor-translation");
+  if (!annotation && editor.selectionStart === editor.selectionEnd) {
+    $("#save-message").className = "save-message error";
+    $("#save-message").textContent = "Select text in the editorial Markdown before adding an annotation.";
+    editor.focus();
+    return;
+  }
+  $("#annotation-id").value = annotation?.annotation_id || "";
+  $("#annotation-kind").value = annotation?.kind || "editorial_note";
+  $("#annotation-text").value = annotation?.text || "";
+  $("#annotation-selection").textContent = annotation?.target?.selected_text || editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  $("#annotation-dialog-title").textContent = annotation ? "Edit annotation" : "Annotate selected text";
+  $("#annotation-dialog").showModal();
+  $("#annotation-text").focus();
+}
+
+function saveAnnotationFromDialog() {
+  const existingId = $("#annotation-id").value;
+  const existing = state.annotations.find((item) => item.annotation_id === existingId);
+  const text = $("#annotation-text").value.trim();
+  if (!text) return false;
+  let annotation;
+  if (existing) {
+    annotation = { ...existing, kind: $("#annotation-kind").value, text, updated_at: new Date().toISOString() };
+    state.annotations = state.annotations.map((item) => item.annotation_id === existingId ? annotation : item);
+  } else {
+    try {
+      annotation = annotationFromSelection($("#editor-translation"), {
+        kind: $("#annotation-kind").value,
+        text,
+        sourceUnitIds: state.selectedReviewTarget?.sourceUnitIds || [],
+      });
+    } catch (error) {
+      $("#save-message").className = "save-message error";
+      $("#save-message").textContent = error.message;
+      return false;
+    }
+    state.annotations = [...state.annotations, annotation];
+  }
+  setDirty(true);
+  renderAnnotationList();
+  renderEditorialPreview();
+  selectEditorialAnnotation(annotation);
+  return true;
+}
+
+function deleteAnnotation(annotationId) {
+  state.annotations = state.annotations.filter((item) => item.annotation_id !== annotationId);
+  if (state.selectedReviewTarget?.id === annotationId) selectReviewTarget(null);
+  setDirty(true);
+  renderAnnotationList();
+  renderEditorialPreview();
+}
+
+function renderAnnotationList() {
+  const list = clear($("#annotation-list"));
+  const editorialText = $("#editor-translation").value;
+  $("#annotation-total").textContent = String(state.annotations.length);
+  for (const annotation of state.annotations) {
+    const status = validateAnnotationSpan(annotation, editorialText);
+    annotation.span_status = status;
+    const card = node("article", { className: `human-annotation ${status}`, dataset: { annotationId: annotation.annotation_id } });
+    const open = node("button", { className: "annotation-open", attrs: { type: "button" } }, [
+      pill(annotation.kind),
+      node("b", { text: annotation.text }),
+      node("q", { text: annotation.target?.selected_text || "" }),
+      node("span", { className: `span-status ${status}`, text: status === "valid" ? "Linked to text" : "Stale span · text changed" }),
+    ]);
+    open.addEventListener("click", () => selectEditorialAnnotation(annotation));
+    const actions = node("div", { className: "annotation-actions" });
+    const edit = node("button", { className: "text-button", text: "Edit", attrs: { type: "button", "aria-label": `Edit annotation ${annotation.text}` } });
+    edit.addEventListener("click", () => openAnnotationDialog(annotation));
+    const remove = node("button", { className: "text-button danger-text", text: "Delete", attrs: { type: "button", "aria-label": `Delete annotation ${annotation.text}` } });
+    remove.addEventListener("click", () => deleteAnnotation(annotation.annotation_id));
+    actions.append(edit, remove);
+    card.append(open, actions);
+    list.append(card);
+  }
+  if (!state.annotations.length) list.append(emptyState("Select text in the editor and choose Add annotation."));
+}
+
 function renderResolutionList() {
   const list = clear($("#resolution-list"));
   const issues = state.view?.issues?.items || [];
@@ -717,10 +726,15 @@ function loadEditorialState(view) {
   const latest = view.editorial?.latest;
   const editorial = latest?.editorial || null;
   state.resolutions = new Map();
+  state.annotations = (editorial?.annotations || []).map((annotation) => ({ ...annotation }));
   for (const item of editorial?.issue_resolutions || []) state.resolutions.set(item.issue_id, { ...item });
   renderMachineFinal();
   const editor = $("#editor-translation");
   editor.value = editorial?.translation || view.machine.final_draft || "";
+  requestAnimationFrame(() => {
+    const savedScroll = Number(sessionStorage.getItem(`interpres:editor-scroll:${view.chunk.chunk_id}`) || 0);
+    editor.scrollTop = Number.isFinite(savedScroll) ? savedScroll : 0;
+  });
   editor.disabled = !view.machine.final_draft_digest;
   $("#save-draft").disabled = editor.disabled;
   $("#approve-revision").disabled = editor.disabled;
@@ -737,9 +751,27 @@ function loadEditorialState(view) {
   if (!history.children.length) history.append(emptyState("No editorial revisions saved yet."));
   $("#revision-history-summary").textContent = `Revision history · ${view.editorial?.revision_count || 0}`;
   $("#issue-total").textContent = String(view.issues?.count || 0);
+  renderAnnotationList();
+  renderMarkdown($("#markdown-preview"), editor.value);
   renderEditorialPreview();
+  renderEditorialDiff(view);
   renderResolutionList();
   setDirty(false);
+}
+
+function renderEditorialDiff(view) {
+  const container = clear($("#editorial-diff"));
+  const base = view.machine?.final_draft || "";
+  const editorial = $("#editor-translation").value || "";
+  if (!base && !editorial) {
+    container.append(emptyState("No machine final or editorial text to compare."));
+    return;
+  }
+  const diff = textDiff(base, editorial);
+  for (const segment of diff) {
+    const tag = segment.kind === "delete" ? "del" : segment.kind === "insert" ? "ins" : "span";
+    container.append(node(tag, { text: segment.text }));
+  }
 }
 
 function annotationsForMachineText() {
@@ -764,11 +796,12 @@ function renderEditorialPreview() {
   const editor = $("#editor-translation");
   const preview = $("#editorial-preview");
   if (!editor || !preview) return;
-  renderAnnotatedText(preview, editor.value || "", annotationsForMachineText(), { preferReplacement: true });
+  renderAnnotatedText(preview, editor.value || "", annotationsForEditorialText(), { preferReplacement: true, editorial: true });
 }
 
 function rerenderReviewSurfaces() {
   document.body.classList.toggle("clean-reading", state.reviewMode === "clean");
+  document.body.classList.toggle("focus-mode", state.reviewMode === "focus");
   renderMachineFinal();
   renderEditorialPreview();
   renderSource(state.view);
@@ -788,6 +821,8 @@ async function saveRevision(revisionState) {
   const payload = {
     state: revisionState,
     translation: $("#editor-translation").value,
+    content_format: "markdown",
+    annotations: state.annotations,
     base_revision_id: latest?.revision_id || null,
     machine_final_digest: state.view.machine.final_draft_digest,
     issue_resolutions: Array.from(state.resolutions.values()),
@@ -1018,10 +1053,11 @@ function renderArtifactErrors(view) {
 }
 
 function renderView(view) {
+  const requestedNavigation = navigationState();
   state.view = view;
   state.selectedUnit = null;
   state.selectedReviewTarget = null;
-  state.reviewIndex = buildReviewIndex(view);
+  state.reviewIndex = buildNormalizedReviewIndex(view);
   const chunk = view.chunk;
   $("#chunk-kicker").textContent = `Book ${chunk.book ?? "—"} · PL ${chunk.pl_start || "—"}–${chunk.pl_end || "—"} · ${chunk.source_unit_count} source units`;
   $("#chunk-title").textContent = `Edit chunk · ${humanize(chunk.final_status)}`;
@@ -1043,8 +1079,15 @@ function renderView(view) {
   renderProvenance(view);
   renderArtifactErrors(view);
   renderLayerControls();
+  setReferenceTab(requestedNavigation.tab, { updateUrl: false });
   applySelection();
   showContent();
+  const requestedAnnotation = state.reviewIndex.annotations.find((item) => item.id === requestedNavigation.target)
+    || state.annotations.map(editorialAnnotationRecord).find((item) => item.id === requestedNavigation.target);
+  const requestedUnit = (view.source?.units || []).find((item) => item.source_unit_id === requestedNavigation.target);
+  if (requestedAnnotation) selectReviewTarget(targetFromAnnotation(requestedAnnotation));
+  else if (requestedUnit) selectUnit(requestedUnit.source_unit_id);
+  if (requestedNavigation.trail) requestAnimationFrame(() => jumpToDecisionTrail(requestedNavigation.trail));
 }
 
 async function loadChunk(chunkId, { skipDirtyCheck = false } = {}) {
@@ -1056,7 +1099,7 @@ async function loadChunk(chunkId, { skipDirtyCheck = false } = {}) {
     state.currentChunkId = chunkId;
     renderView(view);
     renderChunkList();
-    history.replaceState(null, "", `#${encodeURIComponent(chunkId)}`);
+    updateUrlState();
   } catch (error) { showError(error); }
 }
 
@@ -1065,27 +1108,103 @@ async function loadApplication({ preserveChunk = true } = {}) {
   showLoading();
   try {
     state.overview = await requestJson("/api/chunks");
-    const hashChunk = decodeURIComponent(location.hash.replace(/^#/, ""));
-    const requested = preserveChunk && state.currentChunkId ? state.currentChunkId : hashChunk || state.overview.chunks?.[0]?.chunk_id;
+    const requestedChunk = navigationState().chunk;
+    const requested = preserveChunk && state.currentChunkId ? state.currentChunkId : requestedChunk || state.overview.chunks?.[0]?.chunk_id;
     renderChunkList();
     if (!requested) throw new Error("No Book I chunks are available. Run preprocessing first.");
     await loadChunk(requested, { skipDirtyCheck: true });
   } catch (error) { showError(error); }
 }
 
-for (const button of $$(".mini-filter")) button.addEventListener("click", () => {
+for (const button of $$("#issue-filters .mini-filter")) button.addEventListener("click", () => {
   state.issueFilter = button.dataset.issueFilter;
-  for (const item of $$(".mini-filter")) item.classList.toggle("active", item === button);
+  for (const item of $$("#issue-filters .mini-filter")) item.classList.toggle("active", item === button);
   renderResolutionList();
 });
-$("#editor-translation").addEventListener("input", () => { setDirty(true); renderEditorialPreview(); applySelection(); });
+$("#editor-translation").addEventListener("input", () => {
+  setDirty(true);
+  renderMarkdown($("#markdown-preview"), $("#editor-translation").value);
+  renderAnnotationList();
+  renderEditorialPreview();
+  renderEditorialDiff(state.view);
+  applySelection();
+});
+$("#editor-translation").addEventListener("scroll", () => {
+  if (state.currentChunkId) sessionStorage.setItem(`interpres:editor-scroll:${state.currentChunkId}`, String($("#editor-translation").scrollTop));
+});
 $("#clear-unit").addEventListener("click", () => selectUnit(null));
 $("#clear-selection").addEventListener("click", () => selectReviewTarget(null));
+$("#close-sidebar").addEventListener("click", closeEvidenceInspector);
+$("#open-inspector").addEventListener("click", openEvidenceInspector);
+$("#evidence-inspector").addEventListener("close", () => { state.evidenceInspectorOpen = false; });
+$("#minimize-inspector").addEventListener("click", () => {
+  state.evidenceInspectorMinimized = !state.evidenceInspectorMinimized;
+  $("#evidence-inspector").classList.toggle("minimized", state.evidenceInspectorMinimized);
+  $("#minimize-inspector").textContent = state.evidenceInspectorMinimized ? "Restore" : "Minimise";
+  $("#minimize-inspector").setAttribute("aria-pressed", state.evidenceInspectorMinimized ? "true" : "false");
+});
+for (const button of $$("[data-reference-tab]")) button.addEventListener("click", () => setReferenceTab(button.dataset.referenceTab));
+$("#editor-mode-edit").addEventListener("click", () => setEditorMode("edit"));
+$("#editor-mode-preview").addEventListener("click", () => setEditorMode("preview"));
+for (const button of $$("[data-markdown]")) button.addEventListener("click", () => wrapMarkdownSelection($("#editor-translation"), button.dataset.markdown));
+$("#add-annotation").addEventListener("click", () => openAnnotationDialog());
+$("#annotation-form").addEventListener("submit", (event) => {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  if (saveAnnotationFromDialog()) $("#annotation-dialog").close();
+});
+$("#toggle-issue-ledger").addEventListener("click", () => {
+  state.issueLedgerOpen = !state.issueLedgerOpen;
+  $("#issue-ledger").hidden = !state.issueLedgerOpen;
+  $("#toggle-issue-ledger").textContent = state.issueLedgerOpen ? "Close ledger" : "Open ledger";
+  $("#toggle-issue-ledger").setAttribute("aria-expanded", state.issueLedgerOpen ? "true" : "false");
+});
+$("#focus-editor").addEventListener("click", () => {
+  state.focusEditor = !state.focusEditor;
+  document.body.classList.toggle("editor-focus-mode", state.focusEditor);
+  $("#focus-editor").textContent = state.focusEditor ? "Exit focus" : "Focus editor";
+  $("#focus-editor").setAttribute("aria-pressed", state.focusEditor ? "true" : "false");
+});
 $("#save-draft").addEventListener("click", () => saveRevision("draft"));
 $("#approve-revision").addEventListener("click", () => saveRevision("approved"));
 $("#refresh-button").addEventListener("click", () => loadApplication({ preserveChunk: true }));
 $("#retry-button").addEventListener("click", () => loadApplication({ preserveChunk: true }));
 $("#chunk-search").addEventListener("input", renderChunkList);
+$("#chunk-search-input").addEventListener("input", (event) => {
+  const query = event.target.value.trim().toLowerCase();
+  applyChunkSearch(query);
+});
+
+function applyChunkSearch(query) {
+  // Toggle visibility of issue cards, source units, and record cards based on query
+  const cards = $$(".resolution-card");
+  cards.forEach((card) => {
+    const text = card.textContent.toLowerCase();
+    const visible = !query || text.includes(query);
+    card.hidden = !visible;
+  });
+  const units = $$(".latin-unit");
+  units.forEach((unit) => {
+    const text = unit.textContent.toLowerCase();
+    const visible = !query || text.includes(query);
+    unit.style.display = visible ? "" : "none";
+  });
+  const records = $$(".record-card");
+  records.forEach((record) => {
+    const text = record.textContent.toLowerCase();
+    const visible = !query || text.includes(query);
+    record.style.display = visible ? "" : "none";
+  });
+  // Auto-select first visible issue if query matches
+  if (query) {
+    const firstVisible = $$(".resolution-card:not([hidden])")[0];
+    if (firstVisible && !state.selectedReviewTarget) {
+      const issueId = firstVisible.dataset.issueId;
+      const annotation = state.reviewIndex?.byIssue.get(issueId);
+      if (annotation) selectReviewTarget(targetFromAnnotation(annotation), { scroll: true });
+    }
+  }
+}
 $("#show-all-layers").addEventListener("click", () => {
   for (const key of Object.keys(state.layers)) state.layers[key] = true;
   renderLayerControls();
@@ -1098,24 +1217,62 @@ $("#hide-all-layers").addEventListener("click", () => {
 });
 $("#mode-review").addEventListener("click", () => {
   state.reviewMode = "review";
-  $("#mode-review").classList.add("active");
-  $("#mode-clean").classList.remove("active");
+  for (const id of ["mode-review", "mode-focus", "mode-clean"]) $("#" + id).classList.toggle("active", id === "mode-review");
+  rerenderReviewSurfaces();
+});
+$("#mode-focus").addEventListener("click", () => {
+  state.reviewMode = "focus";
+  for (const id of ["mode-review", "mode-focus", "mode-clean"]) $("#" + id).classList.toggle("active", id === "mode-focus");
   rerenderReviewSurfaces();
 });
 $("#mode-clean").addEventListener("click", () => {
   state.reviewMode = "clean";
-  $("#mode-clean").classList.add("active");
-  $("#mode-review").classList.remove("active");
+  for (const id of ["mode-review", "mode-focus", "mode-clean"]) $("#" + id).classList.toggle("active", id === "mode-clean");
   rerenderReviewSurfaces();
 });
 $("#previous-issue").addEventListener("click", () => navigateIssue(-1));
 $("#next-issue").addEventListener("click", () => navigateIssue(1));
-$("#toggle-machine").addEventListener("click", () => {
-  const reference = $(".machine-reference");
-  const collapsed = reference.classList.toggle("collapsed");
-  $("#toggle-machine").textContent = collapsed ? "Expand" : "Collapse";
-  $("#toggle-machine").setAttribute("aria-expanded", collapsed ? "false" : "true");
+for (const link of $$(".decision-jumps a")) link.addEventListener("click", (event) => {
+  event.preventDefault();
+  jumpToDecisionTrail(link.getAttribute("href").slice(1));
+});
+window.addEventListener("keydown", (event) => {
+  const editorFocused = document.activeElement === $("#editor-translation");
+  const searchFocused = document.activeElement === $("#chunk-search-input");
+  if (editorFocused || searchFocused) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      saveRevision(event.shiftKey ? "approved" : "draft");
+    }
+    return;
+  }
+
+  if (event.key === "j" || event.key === "ArrowDown") {
+    event.preventDefault();
+    navigateIssue(1);
+  } else if (event.key === "k" || event.key === "ArrowUp") {
+    event.preventDefault();
+    navigateIssue(-1);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    if ($("#evidence-inspector").open) closeEvidenceInspector();
+    else if (state.focusEditor) $("#focus-editor").click();
+    else selectReviewTarget(null);
+  } else if (event.altKey && event.key === "ArrowLeft") {
+    event.preventDefault();
+    const units = state.view?.source?.units || [];
+    const currentIndex = units.findIndex((u) => u.source_unit_id === state.selectedUnit);
+    const prevIndex = currentIndex > 0 ? currentIndex - 1 : units.length - 1;
+    if (units[prevIndex]) selectUnit(units[prevIndex].source_unit_id);
+  } else if (event.altKey && event.key === "ArrowRight") {
+    event.preventDefault();
+    const units = state.view?.source?.units || [];
+    const currentIndex = units.findIndex((u) => u.source_unit_id === state.selectedUnit);
+    const nextIndex = currentIndex < units.length - 1 ? currentIndex + 1 : 0;
+    if (units[nextIndex]) selectUnit(units[nextIndex].source_unit_id);
+  }
 });
 window.addEventListener("beforeunload", (event) => { if (state.dirty) event.preventDefault(); });
 
+initializeSplitPanel();
 loadApplication({ preserveChunk: false });

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import shutil
+import subprocess
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -16,6 +18,27 @@ from .editorial import EditorialRevisionConflict, EditorialRevisionError
 from .review import ReviewRepository
 
 STATIC_ROOT = Path(__file__).with_name("reviewer_ui")
+DIST_ROOT = STATIC_ROOT / "dist"
+
+
+def _static_root() -> Path:
+    return DIST_ROOT if DIST_ROOT.exists() else STATIC_ROOT
+
+
+def _npm_available() -> bool:
+    return shutil.which("npm") is not None
+
+
+def _start_vite_dev(ui_dir: Path) -> subprocess.Popen | None:
+    if not _npm_available():
+        return None
+    return subprocess.Popen(
+        ["npm", "run", "dev"],
+        cwd=ui_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=True,
+    )
 
 
 class ReviewHTTPServer(ThreadingHTTPServer):
@@ -47,11 +70,16 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_static(self, relative: str) -> None:
-        requested = (STATIC_ROOT / relative).resolve()
-        root = STATIC_ROOT.resolve()
+        root = _static_root().resolve()
+        requested = (root / relative).resolve()
         if requested != root and root not in requested.parents:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
+        if not requested.is_file() and root == DIST_ROOT.resolve():
+            fallback_root = STATIC_ROOT.resolve()
+            fallback = (fallback_root / relative).resolve()
+            if fallback == fallback_root or fallback_root in fallback.parents:
+                requested = fallback
         if requested.is_dir():
             requested = requested / "index.html"
         if not requested.exists() or not requested.is_file():
@@ -89,6 +117,19 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.server.repository.list_chunks())
             return
         if route.startswith("/api/chunks/"):
+            # Handle /api/chunks/{id}/review-links
+            if route.startswith("/api/chunks/") and route.endswith("/review-links"):
+                chunk_id = unquote(route[len("/api/chunks/") : -len("/review-links")])
+                view = self.server.repository.get_chunk(chunk_id)
+                if view is None:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "chunk_not_found", "chunk_id": chunk_id},
+                    )
+                else:
+                    self._send_json(HTTPStatus.OK, view.get("review_links", {}))
+                return
+            # Handle /api/chunks/{id}
             chunk_id = unquote(route[len("/api/chunks/") :])
             value = self.server.repository.get_chunk(chunk_id)
             if value is None:
@@ -220,7 +261,30 @@ def serve_review(
     repository = ReviewRepository(config=config, book=book, profile=profile)
     server = ReviewHTTPServer((host, port), repository)
     actual_host, actual_port = server.server_address[:2]
-    url = f"http://{actual_host}:{actual_port}/"
+    api_url = f"http://{actual_host}:{actual_port}/"
+
+    vite_process = None
+    if _npm_available() and (STATIC_ROOT / "package.json").exists():
+        vite_process = _start_vite_dev(STATIC_ROOT)
+        if vite_process is not None:
+            ui_url = "http://localhost:5173/"
+            print(f"Jerome Reviewer UI (Vite dev): {ui_url}", flush=True)
+            print(f"Python API backend: {api_url}", flush=True)
+            print("Press Ctrl+C to stop.", flush=True)
+            if open_browser:
+                webbrowser.open(ui_url)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+                if vite_process is not None:
+                    vite_process.terminate()
+                    vite_process.wait(timeout=5)
+            return
+
+    url = api_url
     print(f"Jerome Reviewer UI (append-only editorial revisions): {url}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     if open_browser:

@@ -17,6 +17,16 @@ EDITORIAL_MEMORY_POLICY_VERSION = 1
 SAFE_CHUNK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 REVISION_STATES = {"draft", "approved"}
 RESOLUTION_OUTCOMES = {"resolved", "accepted_as_is", "deferred"}
+CONTENT_FORMATS = {"plain_text", "markdown"}
+ANNOTATION_KINDS = {
+    "editorial_note",
+    "translation_decision",
+    "context_note",
+    "scripture_reference",
+    "lexical_note",
+    "todo",
+}
+SAFE_ANNOTATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 
 
 class EditorialRevisionError(ValueError):
@@ -69,12 +79,143 @@ def _summary(revision: dict[str, Any]) -> dict[str, Any]:
         "created_at": revision.get("created_at"),
         "state": editorial.get("state"),
         "translation_digest": editorial.get("translation_digest"),
+        "content_format": editorial.get("content_format", "plain_text"),
+        "annotation_count": len(editorial.get("annotations", []))
+        if isinstance(editorial.get("annotations", []), list)
+        else 0,
         "resolution_count": len(resolutions) if isinstance(resolutions, list) else 0,
         "reusable_resolution_count": len(reusable),
         "machine_final_digest": revision.get("machine", {}).get(
             "final_draft_digest"
         ),
     }
+
+
+def _annotation_span_status(annotation: dict[str, Any], translation: str) -> str:
+    target = annotation.get("target", {})
+    if not isinstance(target, dict):
+        return "stale"
+    start = target.get("start")
+    end = target.get("end")
+    selected_text = target.get("selected_text")
+    if (
+        not isinstance(start, int)
+        or isinstance(start, bool)
+        or not isinstance(end, int)
+        or isinstance(end, bool)
+        or not isinstance(selected_text, str)
+        or start < 0
+        or end <= start
+        or end > len(translation)
+    ):
+        return "stale"
+    return "valid" if translation[start:end] == selected_text else "stale"
+
+
+def _resolved_revision(revision: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a UI-safe legacy-compatible view without rewriting the record."""
+
+    if revision is None:
+        return None
+    resolved = {**revision}
+    editorial = dict(revision.get("editorial", {}))
+    translation = editorial.get("translation")
+    if not isinstance(translation, str):
+        translation = ""
+    editorial["content_format"] = (
+        editorial.get("content_format")
+        if editorial.get("content_format") in CONTENT_FORMATS
+        else "plain_text"
+    )
+    annotations = editorial.get("annotations", [])
+    if not isinstance(annotations, list):
+        annotations = []
+    editorial["annotations"] = [
+        {**item, "span_status": _annotation_span_status(item, translation)}
+        for item in annotations
+        if isinstance(item, dict)
+    ]
+    resolved["editorial"] = editorial
+    return resolved
+
+
+def _validate_annotations(
+    raw_annotations: Any,
+    *,
+    translation: str,
+    created_at: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_annotations, list) or len(raw_annotations) > 500:
+        raise EditorialRevisionError("annotations must be a bounded list")
+    annotations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_annotations:
+        if not isinstance(raw, dict):
+            raise EditorialRevisionError("Every annotation must be an object")
+        annotation_id = str(raw.get("annotation_id") or "")
+        if not SAFE_ANNOTATION_ID.fullmatch(annotation_id):
+            raise EditorialRevisionError("Annotation IDs must be stable safe identifiers")
+        if annotation_id in seen:
+            raise EditorialRevisionError(f"Duplicate annotation_id: {annotation_id}")
+        seen.add(annotation_id)
+        kind = raw.get("kind")
+        if kind not in ANNOTATION_KINDS:
+            raise EditorialRevisionError(f"Invalid annotation kind: {kind!r}")
+        text = raw.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
+            raise EditorialRevisionError(f"Invalid annotation text: {annotation_id}")
+        target = raw.get("target")
+        if not isinstance(target, dict) or target.get("surface") != "editorial":
+            raise EditorialRevisionError(
+                f"Annotation {annotation_id} must target the editorial surface"
+            )
+        start = target.get("start")
+        end = target.get("end")
+        selected_text = target.get("selected_text")
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or start < 0
+            or end <= start
+            or not isinstance(selected_text, str)
+            or not selected_text
+            or len(selected_text) > 50_000
+        ):
+            raise EditorialRevisionError(f"Invalid annotation target: {annotation_id}")
+        source_unit_ids = raw.get("source_unit_ids", [])
+        if (
+            not isinstance(source_unit_ids, list)
+            or len(source_unit_ids) > 100
+            or not all(isinstance(item, str) for item in source_unit_ids)
+        ):
+            raise EditorialRevisionError(
+                f"Invalid annotation source_unit_ids: {annotation_id}"
+            )
+        created = raw.get("created_at") or created_at
+        updated = raw.get("updated_at") or created_at
+        if not isinstance(created, str) or not isinstance(updated, str):
+            raise EditorialRevisionError(
+                f"Invalid annotation timestamps: {annotation_id}"
+            )
+        normalized = {
+            "annotation_id": annotation_id,
+            "kind": kind,
+            "text": text.strip(),
+            "target": {
+                "surface": "editorial",
+                "start": start,
+                "end": end,
+                "selected_text": selected_text,
+            },
+            "source_unit_ids": list(dict.fromkeys(source_unit_ids)),
+            "created_at": created,
+            "updated_at": updated,
+        }
+        normalized["span_status"] = _annotation_span_status(normalized, translation)
+        annotations.append(normalized)
+    return annotations
 
 
 @dataclass
@@ -121,7 +262,7 @@ class EditorialRevisionStore:
         machine_final_digest: str | None,
     ) -> dict[str, Any]:
         values = self.revisions(book, chunk_id)
-        latest = values[-1] if values else None
+        latest = _resolved_revision(values[-1]) if values else None
         return {
             "schema_version": EDITORIAL_REVISION_SCHEMA_VERSION,
             "storage_mode": "append_only_files",
@@ -167,6 +308,9 @@ class EditorialRevisionStore:
             raise EditorialRevisionError("Editorial translation cannot be empty")
         if len(translation) > 250_000:
             raise EditorialRevisionError("Editorial translation is too large")
+        content_format = payload.get("content_format", "plain_text")
+        if content_format not in CONTENT_FORMATS:
+            raise EditorialRevisionError("content_format must be plain_text or markdown")
 
         issue_by_id = {
             str(item.get("issue_id")): item
@@ -235,6 +379,11 @@ class EditorialRevisionStore:
                 )
             revision_number = int(previous.get("revision_number", 0)) + 1 if previous else 1
             created_at = utc_now()
+            annotations = _validate_annotations(
+                payload.get("annotations", []),
+                translation=translation,
+                created_at=created_at,
+            )
             identity = {
                 "book": int(book),
                 "chunk_id": chunk_id,
@@ -242,6 +391,8 @@ class EditorialRevisionStore:
                 "created_at": created_at,
                 "base_revision_id": supplied_base,
                 "translation_digest": text_digest(translation),
+                "content_format": content_format,
+                "annotations": annotations,
                 "resolutions": resolutions,
             }
             revision_id = f"editorial-{canonical_digest(identity)[:16]}"
@@ -261,6 +412,8 @@ class EditorialRevisionStore:
                     "state": editorial_state,
                     "translation": translation,
                     "translation_digest": text_digest(translation),
+                    "content_format": content_format,
+                    "annotations": annotations,
                     "issue_resolutions": resolutions,
                 },
             }

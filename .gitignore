@@ -35,3 +35,5 @@ dependencies/
 
 # Project data (committed under version control)
 # projects/ contains configuration, challenges, and editorial data
+
+node_modules/

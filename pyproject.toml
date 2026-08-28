@@ -52,6 +52,9 @@ interpres = "interpres.cli:main"
 where = ["."]
 include = ["interpres*"]
 
+[tool.setuptools.package-data]
+interpres = ["reviewer_ui/dist/*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"

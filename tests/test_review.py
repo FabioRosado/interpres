@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -728,6 +729,109 @@ class ReviewRepositoryTest(unittest.TestCase):
             after = [self.tree_digest(root) for root in roots]
             self.assertEqual(before, after)
 
+    def test_markdown_and_human_annotations_round_trip_append_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            self.write_fixture(config)
+            repository = ReviewRepository(config)
+            view = repository.get_chunk("book01-fixture")
+            self.assertIsNotNone(view)
+            machine_text = view["machine"]["final_draft"]
+            selected_text = machine_text[:8]
+            annotation = {
+                "annotation_id": "annotation-round-trip",
+                "kind": "translation_decision",
+                "text": "Keep this rendering for the published edition.",
+                "target": {
+                    "surface": "editorial",
+                    "start": 0,
+                    "end": len(selected_text),
+                    "selected_text": selected_text,
+                },
+                "source_unit_ids": ["u1"],
+                "created_at": "2026-08-27T12:00:00Z",
+                "updated_at": "2026-08-27T12:00:00Z",
+            }
+            first = repository.save_editorial_revision(
+                "book01-fixture",
+                {
+                    "state": "draft",
+                    "translation": f"# Heading\n\n{machine_text}",
+                    "content_format": "markdown",
+                    "annotations": [{
+                        **annotation,
+                        "target": {
+                            **annotation["target"],
+                            "start": 11,
+                            "end": 11 + len(selected_text),
+                        },
+                    }],
+                    "base_revision_id": None,
+                    "machine_final_digest": view["machine"]["final_draft_digest"],
+                    "issue_resolutions": [],
+                },
+            )
+            self.assertEqual(first["revision"]["editorial"]["content_format"], "markdown")
+            self.assertEqual(first["revision"]["editorial"]["annotations"][0]["span_status"], "valid")
+
+            updated_annotation = {
+                **first["revision"]["editorial"]["annotations"][0],
+                "text": "Updated private publication note.",
+                "updated_at": "2026-08-27T12:05:00Z",
+            }
+            second = repository.save_editorial_revision(
+                "book01-fixture",
+                {
+                    "state": "draft",
+                    "translation": f"Changed # Heading\n\n{machine_text}",
+                    "content_format": "markdown",
+                    "annotations": [updated_annotation],
+                    "base_revision_id": first["revision"]["revision_id"],
+                    "machine_final_digest": view["machine"]["final_draft_digest"],
+                    "issue_resolutions": [],
+                },
+            )
+            self.assertEqual(second["revision"]["editorial"]["annotations"][0]["span_status"], "stale")
+            self.assertEqual(second["revision"]["editorial"]["annotations"][0]["text"], "Updated private publication note.")
+
+            third = repository.save_editorial_revision(
+                "book01-fixture",
+                {
+                    "state": "draft",
+                    "translation": f"Changed # Heading\n\n{machine_text}",
+                    "content_format": "markdown",
+                    "annotations": [],
+                    "base_revision_id": second["revision"]["revision_id"],
+                    "machine_final_digest": view["machine"]["final_draft_digest"],
+                    "issue_resolutions": [],
+                },
+            )
+            self.assertEqual(third["editorial"]["revision_count"], 3)
+            self.assertEqual(third["revision"]["editorial"]["annotations"], [])
+            reloaded = repository.get_chunk("book01-fixture")
+            self.assertEqual(reloaded["editorial"]["latest"]["editorial"]["content_format"], "markdown")
+            self.assertNotIn("annotations", reloaded["machine"])
+            self.assertNotIn("annotations", reloaded["evidence"])
+
+    def test_legacy_editorial_revision_defaults_to_plain_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            self.write_fixture(config)
+            repository = ReviewRepository(config)
+            view = repository.get_chunk("book01-fixture")
+            saved = repository.save_editorial_revision(
+                "book01-fixture",
+                {
+                    "state": "draft",
+                    "translation": view["machine"]["final_draft"],
+                    "base_revision_id": None,
+                    "machine_final_digest": view["machine"]["final_draft_digest"],
+                    "issue_resolutions": [],
+                },
+            )
+            self.assertEqual(saved["revision"]["editorial"]["content_format"], "plain_text")
+            self.assertEqual(saved["editorial"]["latest"]["editorial"]["annotations"], [])
+
     def test_repository_ignores_newer_records_for_stale_source(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self.config(directory)
@@ -847,25 +951,9 @@ class ReviewRepositoryTest(unittest.TestCase):
                     html = response.read().decode("utf-8")
                 with urllib.request.urlopen(running.url + "styles.css", timeout=5) as response:
                     css = response.read().decode("utf-8")
-                self.assertIn("Editorial desk", html)
-                self.assertIn("Decision trail", html)
+                self.assertIn("Interpres Reviewer", html)
+                self.assertIn('id="app"', html)
                 self.assertIn("[hidden] { display: none !important; }", css)
-                self.assertIn('id="layer-controls"', html)
-                self.assertIn('id="mode-clean"', html)
-                self.assertIn('id="selected-context"', html)
-                for section_id in (
-                    "edit-workspace",
-                    "decision-witnesses",
-                    "decision-challenges",
-                    "decision-adjudicator",
-                    "decision-final",
-                    "decision-verification",
-                    "decision-evidence",
-                    "decision-structural",
-                    "decision-morphology",
-                    "decision-provenance",
-                ):
-                    self.assertIn(f'id="{section_id}"', html)
                 chunk_id = payload["chunks"][0]["chunk_id"]
                 with urllib.request.urlopen(
                     running.url + f"api/chunks/{chunk_id}", timeout=5
@@ -1020,15 +1108,26 @@ class ReviewerUISelectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        cls.app_js = (root / "interpres" / "reviewer_ui" / "app.js").read_text(
-            encoding="utf-8"
-        )
+        cls.ui_root = root / "interpres" / "reviewer_ui"
+        module_paths = [cls.ui_root / "app.js", *sorted((cls.ui_root / "js").glob("*.js"))]
+        cls.app_js = "\n".join(path.read_text(encoding="utf-8") for path in module_paths)
         cls.css = (root / "interpres" / "reviewer_ui" / "styles.css").read_text(
             encoding="utf-8"
         )
+        cls.html = (root / "interpres" / "reviewer_ui" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        cls.component_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((cls.ui_root / "src").rglob("*.ts*"))
+        )
+        cls.component_css = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((cls.ui_root / "src" / "styles").glob("*.css"))
+        )
 
     def test_source_unit_selection_can_select_mapped_machine_final_span(self):
-        self.assertIn("add(annotationRecord({\n      id: `source-map:${unit.source_unit_id}`", self.app_js)
+        self.assertIn("id: `source-map:${unit.source_unit_id}`", self.app_js)
         self.assertIn("type: \"source_mapping\"", self.app_js)
         self.assertIn("sourceUnitIds: [unit.source_unit_id]", self.app_js)
         self.assertIn("annotationRange(text, annotation, options)", self.app_js)
@@ -1067,6 +1166,116 @@ class ReviewerUISelectionTest(unittest.TestCase):
         self.assertIn("selectReviewTarget(null", self.app_js)
         self.assertIn("element.classList.toggle(\"selected\", targetMatchesAnnotation(target, annotation))", self.app_js)
         self.assertIn("selected-mapping-missing", self.app_js)
+
+    def test_context_inspector_is_non_modal_and_preserves_selection(self):
+        self.assertIn('<aside className="evidence-inspector"', self.component_source)
+        self.assertIn("document.addEventListener('keydown', handleKeyDown)", self.component_source)
+        self.assertNotIn('<wa-drawer ref={drawerRef}', self.component_source)
+        self.assertIn("onClose={() => setState", self.component_source)
+        self.assertNotIn("selectedReviewTarget: null, evidenceInspectorOpen: false", self.component_source)
+        self.assertIn(".evidence-inspector {", self.component_css)
+
+    def test_focus_mode_button_and_css_exist(self):
+        self.assertIn("(['review', 'focus', 'clean'] as const)", self.component_source)
+        self.assertIn("review-mode-${state.reviewMode}", self.component_source)
+        self.assertIn(".review-mode-focus .annotation:not(.selected)", self.component_css)
+
+    def test_clean_reading_preserves_source_selection_highlight(self):
+        self.assertIn(".clean-reading .annotation.selected-source", self.css)
+        self.assertIn("border-bottom: 3px solid var(--indigo)", self.css)
+
+    def test_keyboard_shortcuts_exist(self):
+        self.assertIn("event.key === \"j\" || event.key === \"ArrowDown\"", self.app_js)
+        self.assertIn("event.key === \"k\" || event.key === \"ArrowUp\"", self.app_js)
+        self.assertIn("event.key === \"Escape\"", self.app_js)
+        self.assertIn("event.altKey && event.key === \"ArrowLeft\"", self.app_js)
+        self.assertIn("event.altKey && event.key === \"ArrowRight\"", self.app_js)
+
+    def test_editorial_diff_drawer_exists(self):
+        self.assertIn("<EditorialDiff", self.component_source)
+        self.assertIn("editorial-diff-drawer", self.component_css)
+        self.assertIn("textDiff(base, editorial)", self.component_source)
+
+    def test_review_links_endpoint_exposed(self):
+        audit = fixture_audit("corrected")
+        view = build_review_view(audit)
+        self.assertIn("review_links", view)
+        self.assertIn("persisted", view["review_links"])
+        self.assertIn("unavailable", view["review_links"])
+
+    def test_explicit_evidence_ids_preferred_over_regex(self):
+        audit = fixture_audit("corrected")
+        finding = {
+            "finding_id": "test-finding",
+            "source_unit_ids": ["u1"],
+            "evidence_ids": ["ev-explicit"],
+            "message": "Test",
+        }
+        from interpres.review import _normalise_finding
+        normalised = _normalise_finding(finding, prefix="test", index=1, source_units=audit["source_units"])
+        self.assertEqual(normalised["evidence_ids"], ["ev-explicit"])
+        self.assertTrue(normalised["evidence_ids_explicit"])
+
+    def test_final_edit_offsets_computed(self):
+        audit = fixture_audit("corrected")
+        view = build_review_view(audit)
+        edits = view["adjudicator"]["edits"]
+        self.assertTrue(len(edits) > 0)
+        for edit in edits:
+            if edit.get("start_before") is not None and edit.get("end_before") is not None:
+                self.assertIn("final_start_offset", edit)
+                self.assertIn("final_end_offset", edit)
+
+    def test_frontend_modules_parse_and_are_loaded_as_es_modules(self):
+        self.assertIn('type="module"', self.html)
+        modules = [self.ui_root / "app.js", *sorted((self.ui_root / "js").glob("*.js"))]
+        for module in modules:
+            result = subprocess.run(
+                ["node", "--check", str(module)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_editor_first_tabs_markdown_and_compact_ledger_exist(self):
+        self.assertIn('className="reference-sidebar"', self.component_source)
+        self.assertIn("<SourcePane", self.component_source)
+        self.assertIn("<MachineFinalPane", self.component_source)
+        self.assertIn("<MarkdownPreview markdown={text}", self.component_source)
+        self.assertIn("<IssueNavigator", self.component_source)
+        self.assertIn("state.selectedReviewTarget", self.component_source)
+        self.assertIn('className="issue-sidebar"', self.component_source)
+        self.assertIn("decision-trail", self.component_source)
+
+    def test_primary_workspace_keeps_reference_sidebar_beside_editor(self):
+        self.assertIn('className="workstation-grid"', self.component_source)
+        self.assertIn('className="reference-sidebar"', self.component_source)
+        self.assertIn('className="editor-column"', self.component_source)
+        self.assertIn("grid-template-columns: minmax(340px, 500px)", self.component_css)
+        self.assertIn('role="tablist" aria-label="Reference text"', self.component_source)
+        self.assertIn("Authoritative source", self.component_source)
+        self.assertIn("Machine final · locked", self.component_source)
+
+    def test_full_resolution_ledger_is_permanently_docked(self):
+        self.assertIn('id="issue-heading">Resolution Ledger', self.component_source)
+        self.assertIn('id="issue-ledger"', self.component_source)
+        self.assertIn('className="issue-sidebar"', self.component_source)
+        self.assertIn("docked", self.component_source)
+        self.assertIn("issueLedgerOpen: true", self.component_source)
+
+    def test_human_annotation_ui_uses_structured_metadata(self):
+        self.assertIn('id="add-annotation"', self.component_source)
+        self.assertIn('className="annotation-list"', self.component_source)
+        self.assertIn("validateAnnotationSpan", self.component_source)
+        self.assertIn("content_format: 'markdown'", self.component_source)
+        self.assertIn("annotations: state.annotations", self.component_source)
+
+    def test_markdown_preview_escapes_raw_html_and_filters_links(self):
+        markdown_module = (self.ui_root / "js" / "markdown.js").read_text(encoding="utf-8")
+        self.assertIn('.replaceAll("<", "&lt;")', markdown_module)
+        self.assertIn('/^(https?:|mailto:|#)/i', markdown_module)
+        self.assertNotIn("eval(", markdown_module)
 
 
 if __name__ == "__main__":
