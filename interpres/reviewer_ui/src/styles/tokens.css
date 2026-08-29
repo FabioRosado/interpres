@@ -1,50 +1,101 @@
-/* Design tokens extracted from legacy styles.css */
+/* Design tokens — Interpres scholarly workstation (FI-inspired) */
 :root {
-  --ip-paper: #f1ede3;
-  --ip-surface: #fffdf8;
-  --ip-surface-muted: #f8f4ea;
-  --ip-ink: #20201d;
-  --ip-muted: #69655b;
-  --ip-border: #d7cfbd;
-  --ip-accent: #24375f;
-  --ip-warning: #a76d19;
-  --ip-danger: #a34235;
-  --ip-success: #276248;
-  --ip-prosecutor: #694d7e;
+  /* Base surfaces — warm ivory / parchment */
+  --ip-bg: #eee8dc;
+  --ip-paper: #f7f2e8;
+  --ip-paper-strong: #fffaf1;
+  --ip-surface: #faf6ee;
+  --ip-surface-muted: #f3ede3;
 
+  /* Text — dark ink */
+  --ip-ink: #29261f;
+  --ip-ink-soft: #4c473d;
+  --ip-muted: #766f63;
+
+  /* Borders — warm, thin */
+  --ip-border: #d8cfbf;
+  --ip-border-strong: #bdb19e;
+
+  /* Accents — restrained warmth */
+  --ip-olive: #68705a;
+  --ip-olive-soft: #e4e7dc;
+  --ip-olive-muted: #a8b09c;
+
+  --ip-gold: #9a7b45;
+  --ip-gold-soft: #eee4d0;
+  --ip-gold-muted: #d4c09a;
+
+  /* Selection / focus */
+  --ip-selection: #e9dfc7;
+  --ip-focus: #9a7b45;
+
+  /* Shadows — gentle */
+  --ip-shadow: rgba(50, 42, 30, 0.08);
+  --ip-shadow-strong: rgba(50, 42, 30, 0.14);
+
+  /* Semantic — independent of branding */
+  --ip-success: #2d6a4f;
+  --ip-success-soft: #e4f1e9;
+  --ip-warning: #9a7b45;
+  --ip-warning-soft: #eee4d0;
+  --ip-danger: #a34235;
+  --ip-danger-soft: #f8e6e2;
+  --ip-info: #3a5ba0;
+  --ip-info-soft: #e7ebf4;
+
+  /* Prosecutor / adjudicator specific */
+  --ip-prosecutor: #a85c3a;
+  --ip-prosecutor-soft: #f5ebe6;
+  --ip-adjudicator: #5a4a7a;
+  --ip-adjudicator-soft: #eee7f4;
+
+  /* Witness disagreement */
+  --ip-witness: #4a6d7a;
+  --ip-witness-soft: #dfe8eb;
+
+  /* Deterministic */
+  --ip-deterministic: #8b7d4a;
+  --ip-deterministic-soft: #f0ebdd;
+
+  /* Typography */
+  --serif: "Source Serif 4", "Charter", "Bitstream Charter", Georgia, "Times New Roman", serif;
+  --sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  font-family: var(--sans);
+  background: var(--ip-bg);
+  color: var(--ip-ink);
+}
+
+/* Legacy aliases for gradual migration */
+:root {
   --ink: var(--ip-ink);
   --muted: var(--ip-muted);
   --paper: var(--ip-paper);
   --panel: var(--ip-surface);
   --panel-soft: var(--ip-surface-muted);
   --line: var(--ip-border);
-  --line-strong: #a99f89;
-  --indigo: var(--ip-accent);
-  --indigo-soft: #e7ebf4;
-  --ochre: var(--ip-warning);
-  --ochre-soft: #f6ead2;
+  --line-strong: var(--ip-border-strong);
+  --indigo: var(--ip-olive);
+  --indigo-soft: var(--ip-olive-soft);
+  --ochre: var(--ip-gold);
+  --ochre-soft: var(--ip-gold-soft);
   --green: var(--ip-success);
-  --green-soft: #e4f1e9;
+  --green-soft: var(--ip-success-soft);
   --red: var(--ip-danger);
-  --red-soft: #f8e6e2;
-  --violet: var(--ip-prosecutor);
-  --violet-soft: #eee7f4;
-
-  --serif: Georgia, "Times New Roman", serif;
-  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-family: var(--sans);
-  background: var(--paper);
-  color: var(--ink);
+  --red-soft: var(--ip-danger-soft);
+  --violet: var(--ip-adjudicator);
+  --violet-soft: var(--ip-adjudicator-soft);
 }
 
 /* Web Awesome theme mapping */
 :root {
-  --wa-color-primary: var(--ip-accent);
+  --wa-color-primary: var(--ip-olive);
   --wa-color-success: var(--ip-success);
   --wa-color-warning: var(--ip-warning);
   --wa-color-danger: var(--ip-danger);
   --wa-color-neutral: var(--ip-muted);
-  --wa-border-radius: 0.4rem;
+  --wa-border-radius: 0.35rem;
   --wa-input-border-color: var(--ip-border);
-  --wa-input-focus-border-color: var(--ip-warning);
+  --wa-input-focus-border-color: var(--ip-gold);
 }

@@ -1,27 +1,88 @@
-/* Typography */
-.eyebrow { margin: 0 0 .2rem; color: var(--ochre); font-size: .63rem; line-height: 1.2; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-.masthead .eyebrow { color: #d8c8a7; }
+/* Typography system — scholarly workstation */
+@import './tokens.css';
 
-h1, h2, h3, h4 { margin: 0; font-family: var(--serif); font-weight: 600; }
-h1 { font-size: 1.22rem; }
-h3 { font-size: 1.13rem; color: var(--indigo); }
-h4 { font-size: .96rem; }
+/* Base */
+:root { --text-base: 1rem; }
 
-.latin-text, .latin-quote { font-family: var(--serif); }
-.latin-text { margin: 0; font-size: 1rem; line-height: 1.63; }
+/* Document text — serif, comfortable long-form reading */
+.latin-text,
+.latin-quote,
+.witness-text,
+.final-translation,
+.machine-final-text,
+.editorial-diff,
+.decision-summary,
+.translation-diff,
+.latin-unit p,
+.markdown-preview,
+.markdown-preview *,
+.inspector-record p,
+.latin-quote *,
+.quote {
+  font-family: var(--serif);
+  line-height: 1.7;
+}
 
-.unit-label { display: block; margin-bottom: .3rem; color: var(--muted); font: .58rem/1.3 ui-monospace, Consolas, monospace; }
+.latin-text { margin: 0; font-size: 1rem; }
+.witness-text, .final-translation { font-size: 1rem; line-height: 1.7; }
+.latin-unit p { font-size: 1rem; }
 
-.model-line, .mapping-note, .provenance-line { color: var(--muted); font-size: .65rem; }
+/* Editor text — serif for the writing surface */
+#editor-translation,
+.editorial-diff,
+.markdown-preview,
+.writing-pane .markdown-preview {
+  font-family: var(--serif);
+  line-height: 1.75;
+}
+#editor-translation { font-size: 1.05rem; }
 
-.record-card p { margin: .35rem 0 0; font-size: .76rem; line-height: 1.45; }
-.record-card .latin-quote { color: var(--indigo); }
+/* UI chrome — sans-serif, compact, clear hierarchy */
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-family: var(--sans);
+  font-weight: 700;
+  line-height: 1.2;
+}
+h1 { font-size: 1.22rem; color: var(--ip-ink); }
+h2 { font-size: 1.05rem; color: var(--ip-ink); }
+h3 { font-size: .95rem; color: var(--ip-olive); }
+h4 { font-size: .84rem; color: var(--ip-ink); }
+h5 { font-size: .72rem; }
 
-.witness-text, .final-translation { font: .98rem/1.6 var(--serif); }
+/* Metadata — monospace, subordinate */
+.unit-label { display: block; margin-bottom: .3rem; color: var(--ip-muted); font: .58rem/1.3 var(--mono); }
+.chunk-id { max-width: 76ch; margin: .25rem 0 0; overflow-wrap: anywhere; color: var(--ip-muted); font: .64rem/1.3 var(--mono); }
+.model-line, .mapping-note, .provenance-line { color: var(--ip-muted); font-size: .65rem; line-height: 1.4; font-family: var(--sans); }
+.context-section dt { color: var(--ip-muted); font-weight: 700; font-size: .6rem; text-transform: uppercase; letter-spacing: .05em; }
+.stage-meta { color: var(--ip-muted); font-size: .62rem; }
+.history-row small { color: var(--ip-muted); }
 
-.context-drawer { margin-top: .7rem; color: var(--muted); font-size: .7rem; }
+/* Controls — sans-serif */
+.eyebrow { color: var(--ip-gold); font-family: var(--sans); }
+.status-badge, .revision-badge, .save-state, .chunk-total,
+.pill, .severity-pill, .evidence-grade, .context-badge,
+.type-pill, .base-witness, .section-note, .evidence-key,
+.layer-toggle, .unit-button { font-family: var(--sans); }
+
+/* Evidence/status labels — sans-serif for clarity */
+.context-section summary { font: 700 .75rem/1.4 var(--sans); color: var(--ip-ink); }
+.inspector-section > summary { cursor: pointer; color: var(--ip-olive); font: 700 .76rem/1.4 var(--sans); }
+
+/* Record cards */
+.record-card p { margin: .35rem 0 0; font-size: .76rem; line-height: 1.45; font-family: var(--sans); }
+.record-card .latin-quote { color: var(--ip-olive); font-family: var(--serif); }
+
+/* Context drawer metadata */
+.context-drawer { margin-top: .7rem; color: var(--ip-muted); font-size: .7rem; font-family: var(--sans); }
 .context-drawer summary, details summary { cursor: pointer; }
 
-.annotated-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Annotated text */
+.annotated-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font-family: var(--serif); font-size: 1rem; }
 
-.empty-state { padding: .7rem; color: var(--muted); background: var(--panel-soft); border: 1px dashed var(--line); font-size: .7rem; }
+/* Section headings in trail */
+.section-heading p, .section-heading small { color: var(--ip-muted); font-size: .7rem; font-family: var(--sans); }
+.subsection-heading h4 { color: var(--ip-ink); font-family: var(--sans); }
+
+/* Empty state */
+.empty-state { padding: .7rem; color: var(--ip-muted); background: var(--ip-surface-muted); border: 1px dashed var(--ip-border); font-size: .7rem; font-family: var(--sans); }

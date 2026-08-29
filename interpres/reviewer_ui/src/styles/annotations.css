@@ -1,28 +1,86 @@
-/* Annotation highlighting */
+/* Annotation highlighting — restrained warm layer system */
+@import './tokens.css';
+
+/* Base annotation style */
 .annotation {
   position: relative;
   border-radius: .18rem;
-  border-bottom: 2px solid var(--line-strong);
-  box-shadow: inset 0 -0.48em rgba(167,109,25,.2);
+  border-bottom: 2px solid var(--ip-border-strong);
   cursor: pointer;
 }
-.annotation:focus-visible { outline: 2px solid var(--indigo); outline-offset: 2px; }
-.annotation.selected { background: #fff3ba; box-shadow: inset 0 0 0 2px var(--indigo); }
-.annotation.deterministic { border-bottom-color: var(--red); box-shadow: inset 0 -0.48em rgba(163,66,53,.2); }
-.annotation.witness_disagreement { border-bottom-color: var(--violet); box-shadow: inset 0 -0.48em rgba(105,77,126,.2); }
-.annotation.prosecutor { border-bottom-color: var(--ochre); box-shadow: inset 0 -0.48em rgba(167,109,25,.25); }
-.annotation.adjudicator, .annotation.adjudicator_edit { border-bottom-color: var(--green); box-shadow: inset 0 -0.48em rgba(39,98,72,.22); }
-.annotation.unresolved, .annotation.human_review, .annotation.verification { border-bottom-style: double; }
-.annotation.hidden-layer { background: transparent; border-bottom-color: transparent; box-shadow: none; }
+.annotation:focus-visible { outline: 2px solid var(--ip-focus); outline-offset: 2px; }
+
+/* Current selection — warm gold */
+.annotation.selected {
+  background: var(--ip-selection);
+  box-shadow: inset 0 0 0 2px var(--ip-gold);
+}
+
+/* Annotation type highlights — restrained palette */
+
+/* Source mapping — soft gold tint */
+.annotation.source_mapping,
+.annotation.selected-source {
+  background: var(--ip-gold-soft);
+  border-bottom: 2px dotted var(--ip-gold);
+  box-shadow: inset 0 0 0 1px var(--ip-gold);
+}
+.annotation.selected-source,
+.annotation.hidden-layer.selected-source {
+  background: var(--ip-gold-soft) !important;
+  border-bottom: 3px solid var(--ip-gold) !important;
+  box-shadow: inset 0 0 0 2px var(--ip-gold), 0 0 0 2px var(--ip-selection) !important;
+}
+
+/* Deterministic — muted amber/gold */
+.annotation.deterministic {
+  border-bottom-color: var(--ip-gold);
+  background: var(--ip-warning-soft);
+}
+
+/* Witness disagreement — dusty blue/neutral contrast */
+.annotation.witness_disagreement {
+  border-bottom-color: var(--ip-witness);
+  background: var(--ip-witness-soft);
+}
+
+/* Prosecutor — soft terracotta/muted red-orange */
+.annotation.prosecutor {
+  border-bottom-color: var(--ip-prosecutor);
+  background: var(--ip-prosecutor-soft);
+}
+
+/* Evidence-linked — olive/green */
+.annotation.evidence {
+  border-bottom-color: var(--ip-olive);
+  background: var(--ip-olive-soft);
+}
+
+/* Adjudicator — muted violet/gray */
+.annotation.adjudicator,
+.annotation.adjudicator_edit {
+  border-bottom-color: var(--ip-adjudicator);
+  background: var(--ip-adjudicator-soft);
+}
+
+/* Unresolved / human review — warning amber */
+.annotation.unresolved,
+.annotation.human_review,
+.annotation.verification {
+  border-bottom-style: double;
+  border-bottom-color: var(--ip-warning);
+  background: var(--ip-warning-soft);
+}
+
+/* Hidden layer */
+.annotation.hidden-layer {
+  background: transparent;
+  border-bottom-color: transparent;
+  box-shadow: none;
+}
 .annotation.hidden-layer::after { display: none; }
 
-.annotation.selected-source, .annotation.hidden-layer.selected-source {
-  background: #fff0a6 !important;
-  border-bottom: 3px solid var(--indigo) !important;
-  box-shadow: inset 0 0 0 2px var(--indigo), 0 0 0 2px rgba(36,55,95,.12) !important;
-}
-.annotation.selected-source::after { display: inline-grid; background: var(--indigo); }
-
+/* Annotation markers (small badges) */
 .annotation::after {
   content: attr(data-marker);
   display: inline-grid;
@@ -32,21 +90,66 @@
   margin-left: .12rem;
   border-radius: 999px;
   color: white;
-  background: var(--indigo);
+  background: var(--ip-olive);
   font: .5rem/1 var(--sans);
   vertical-align: super;
+  font-weight: 700;
 }
 
-.mapping-missing { border-bottom: 1px dotted var(--line-strong); }
-.mapping-missing::after { content: "not mapped"; margin-left: .25rem; color: var(--muted); font: .55rem/1 var(--sans); text-transform: uppercase; }
-.selected-mapping-missing { display: inline-flex; align-items: center; margin-left: .35rem; padding: .15rem .35rem; border: 1px solid #e6cfa8; border-radius: .25rem; color: #7d4d0d; background: var(--ochre-soft); font: .58rem/1.2 var(--sans); }
-.selected-mapping-missing::after { color: #7d4d0d; font-weight: 800; }
+/* Source mapping specific marker */
+.annotation.source_mapping::after { background: var(--ip-gold); }
+.annotation.evidence::after { background: var(--ip-olive); }
+.annotation.prosecutor::after { background: var(--ip-prosecutor); }
+.annotation.adjudicator::after { background: var(--ip-adjudicator); }
+.annotation.deterministic::after { background: var(--ip-warning); }
+.annotation.witness_disagreement::after { background: var(--ip-witness); }
+.annotation.unresolved::after,
+.annotation.human_review::after,
+.annotation.verification::after { background: var(--ip-warning); }
+
+/* Missing mapping indicator */
+.mapping-missing { border-bottom: 1px dotted var(--ip-border-strong); }
+.mapping-missing::after {
+  content: "not mapped";
+  margin-left: .25rem;
+  color: var(--ip-muted);
+  font: .55rem/1 var(--sans);
+  text-transform: uppercase;
+}
+.selected-mapping-missing {
+  display: inline-flex;
+  align-items: center;
+  margin-left: .35rem;
+  padding: .15rem .35rem;
+  border: 1px solid var(--ip-warning);
+  border-radius: .25rem;
+  color: var(--ip-warning);
+  background: var(--ip-warning-soft);
+  font: .58rem/1.2 var(--sans);
+}
+.selected-mapping-missing::after {
+  color: var(--ip-warning);
+  font-weight: 800;
+}
 
 /* Review modes */
-.clean-reading .annotation, .clean-reading .annotation-marker, .clean-reading .editorial-preview-shell { background: transparent !important; border-color: transparent !important; box-shadow: none !important; text-decoration: none !important; }
-.clean-reading .annotation::after, .clean-reading .mapping-missing::after, .clean-reading .source-badges { display: none; }
-.clean-reading .annotation.selected-source, .clean-reading .annotation.hidden-layer.selected-source { background: #fff0a6 !important; border-bottom: 3px solid var(--indigo) !important; box-shadow: inset 0 0 0 2px var(--indigo), 0 0 0 2px rgba(36,55,95,.12) !important; }
-.clean-reading .annotation.selected-source::after { display: inline-grid; background: var(--indigo); }
+.clean-reading .annotation,
+.clean-reading .annotation-marker,
+.clean-reading .editorial-preview-shell {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  text-decoration: none !important;
+}
+.clean-reading .annotation::after,
+.clean-reading .mapping-missing::after,
+.clean-reading .source-badges { display: none; }
+.clean-reading .annotation.selected-source,
+.clean-reading .annotation.hidden-layer.selected-source {
+  background: var(--ip-gold-soft) !important;
+  border-bottom: 3px solid var(--ip-gold) !important;
+  box-shadow: inset 0 0 0 2px var(--ip-gold), 0 0 0 2px var(--ip-selection) !important;
+}
 
 .focus-mode .annotation:not(.selected) { opacity: 0.12; }
 .focus-mode .annotation.selected { opacity: 1; }
@@ -56,8 +159,9 @@
 .focus-mode .resolution-card:not(.selected) { opacity: 0.5; }
 .focus-mode .resolution-card.selected { opacity: 1; }
 
+/* Trail flash animation */
 .trail-highlight { animation: trail-flash 2s ease-out; }
 @keyframes trail-flash {
-  0% { background: rgba(36,55,95,.12); box-shadow: 0 0 0 2px var(--indigo); }
+  0% { background: var(--ip-gold-soft); box-shadow: 0 0 0 2px var(--ip-gold); }
   100% { background: transparent; box-shadow: none; }
 }

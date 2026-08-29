@@ -17,8 +17,8 @@ export const AppHeader = ({ onRefresh, onExport, onImport, transferMessage }: Pr
     <div className="masthead-actions">
       <span className="safety-pill">Machine record locked</span>
       {transferMessage ? <span className="transfer-message">{transferMessage}</span> : null}
-      <button className="quiet-button dark" onClick={onExport} type="button">Export</button>
-      <label className="quiet-button dark import-button">
+      <button className="quiet-button" onClick={onExport} type="button">Export</button>
+      <label className="quiet-button import-button">
         Import
         <input
           type="file"
@@ -31,7 +31,7 @@ export const AppHeader = ({ onRefresh, onExport, onImport, transferMessage }: Pr
           }}
         />
       </label>
-      <button className="quiet-button dark" onClick={onRefresh} type="button">Refresh</button>
+      <button className="quiet-button" onClick={onRefresh} type="button">Refresh</button>
     </div>
   </header>
 );

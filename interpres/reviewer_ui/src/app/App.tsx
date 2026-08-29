@@ -379,7 +379,7 @@ export const App = () => {
     [state.view, state.resolutions],
   );
 
-  if (state.loading) return <LoadingPanel />;
+  if (state.loading && !state.view) return <LoadingPanel />;
   if (state.error) return <ErrorPanel error={state.error} onRetry={() => void loadOverview()} />;
   if (!state.overview || !state.projectCatalog || !state.selectedProjectId) return <ErrorPanel error="No reviewable chunks are available." onRetry={() => void loadOverview()} />;
   if (!state.view) {
@@ -429,6 +429,12 @@ export const App = () => {
       />
       <main className="review-main" id="review-main" tabIndex={-1}>
         <div id="review-content">
+          {state.loading && state.view && (
+            <div className="loading-overlay" role="status" aria-live="polite">
+              <div className="loading-spinner" aria-hidden="true"></div>
+              <p>Loading chunk…</p>
+            </div>
+          )}
           <ChunkToolbar
             chunk={state.view.chunk}
             onPrevious={() => requestChunk(state.view?.chunk.navigation.previous || null)}
