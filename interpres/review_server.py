@@ -11,9 +11,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .config import PipelineConfig
+from .config import ConfigurationError, PipelineConfig, load_config
 from .editorial import EditorialRevisionConflict, EditorialRevisionError
 from .review import ReviewRepository
 
@@ -48,8 +48,10 @@ class ReviewHTTPServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         repository: ReviewRepository,
+        catalog: "ReviewProjectCatalog",
     ):
         self.repository = repository
+        self.catalog = catalog
         super().__init__(server_address, ReviewRequestHandler)
 
 
@@ -101,6 +103,25 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _repository_from_query(self) -> ReviewRepository:
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        project_id = (query.get("project") or [None])[0]
+        raw_book = (query.get("book") or [None])[0]
+        raw_profile = (query.get("profile") or [None])[0]
+        book = self.server.repository.book
+        if raw_book:
+            try:
+                book = int(raw_book)
+            except ValueError:
+                raise ValueError(f"Invalid book: {raw_book!r}")
+        profile = raw_profile or self.server.repository.profile
+        return self.server.catalog.repository(
+            project_id or self.server.catalog.default_project_id,
+            book=book,
+            profile=profile,
+        )
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         route = urlparse(self.path).path
         if route == "/api/health":
@@ -110,17 +131,37 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "mode": "immutable_machine_append_only_editorial",
                     "book": self.server.repository.book,
+                    "project": self.server.catalog.default_project_id,
                 },
             )
             return
+        if route == "/api/projects":
+            self._send_json(HTTPStatus.OK, self.server.catalog.to_api())
+            return
         if route == "/api/chunks":
-            self._send_json(HTTPStatus.OK, self.server.repository.list_chunks())
+            try:
+                repository = self._repository_from_query()
+            except (ConfigurationError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_project_selection", "message": str(exc)},
+                )
+                return
+            self._send_json(HTTPStatus.OK, repository.list_chunks())
             return
         if route.startswith("/api/chunks/"):
+            try:
+                repository = self._repository_from_query()
+            except (ConfigurationError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_project_selection", "message": str(exc)},
+                )
+                return
             # Handle /api/chunks/{id}/review-links
             if route.startswith("/api/chunks/") and route.endswith("/review-links"):
                 chunk_id = unquote(route[len("/api/chunks/") : -len("/review-links")])
-                view = self.server.repository.get_chunk(chunk_id)
+                view = repository.get_chunk(chunk_id)
                 if view is None:
                     self._send_json(
                         HTTPStatus.NOT_FOUND,
@@ -131,7 +172,7 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
                 return
             # Handle /api/chunks/{id}
             chunk_id = unquote(route[len("/api/chunks/") :])
-            value = self.server.repository.get_chunk(chunk_id)
+            value = repository.get_chunk(chunk_id)
             if value is None:
                 self._send_json(
                     HTTPStatus.NOT_FOUND,
@@ -172,7 +213,15 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                value = self.server.repository.save_editorial_revision(
+                repository = self._repository_from_query()
+            except (ConfigurationError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_project_selection", "message": str(exc)},
+                )
+                return
+            try:
+                value = repository.save_editorial_revision(
                     parts[2], payload
                 )
             except EditorialRevisionConflict as exc:
@@ -230,6 +279,108 @@ class RunningReviewServer:
         self.thread.join(timeout=5)
 
 
+@dataclass(frozen=True)
+class ReviewProject:
+    project_id: str
+    title: str
+    path: Path
+    config: PipelineConfig
+    books: list[int]
+
+
+class ReviewProjectCatalog:
+    def __init__(self, default_config: PipelineConfig):
+        self.default_project_id = default_config.project_id
+        self._projects = self._discover(default_config)
+
+    @staticmethod
+    def _candidate_config_paths(default_config: PipelineConfig) -> list[Path]:
+        paths: list[Path] = [default_config.path]
+        projects_dirs: list[Path] = []
+        for candidate in (
+            default_config.root / "projects",
+            default_config.root.parent,
+            default_config.path.parent.parent,
+        ):
+            if candidate.name == "projects" or (candidate / "projects").exists():
+                projects_dirs.append(
+                    candidate if candidate.name == "projects" else candidate / "projects"
+                )
+        for projects_dir in projects_dirs:
+            if projects_dir.is_dir():
+                paths.extend(sorted(project / "pipeline.yaml" for project in projects_dir.iterdir() if (project / "pipeline.yaml").is_file()))
+        unique: list[Path] = []
+        seen: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                unique.append(resolved)
+        return unique
+
+    @staticmethod
+    def _books(config: PipelineConfig) -> list[int]:
+        books = config.data.get("source", {}).get("books", {})
+        if not isinstance(books, dict):
+            return [1]
+        parsed = []
+        for key in books:
+            try:
+                parsed.append(int(key))
+            except (TypeError, ValueError):
+                continue
+        return sorted(parsed) or [1]
+
+    def _discover(self, default_config: PipelineConfig) -> dict[str, ReviewProject]:
+        projects: dict[str, ReviewProject] = {}
+        for path in self._candidate_config_paths(default_config):
+            try:
+                config = default_config if path == default_config.path.resolve() else load_config(path)
+            except ConfigurationError:
+                continue
+            project_id = config.project_id
+            if project_id in projects:
+                continue
+            project = config.project
+            projects[project_id] = ReviewProject(
+                project_id=project_id,
+                title=str(project.get("title") or project.get("description") or project_id),
+                path=config.path,
+                config=config,
+                books=self._books(config),
+            )
+        return projects
+
+    def repository(self, project_id: str, *, book: int, profile: str) -> ReviewRepository:
+        project = self._projects.get(project_id)
+        if project is None:
+            raise ConfigurationError(f"Unknown review project: {project_id}")
+        if book not in project.books:
+            raise ConfigurationError(
+                f"Project {project_id!r} has no configured book {book}"
+            )
+        return ReviewRepository(config=project.config, book=book, profile=profile)
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "default_project_id": self.default_project_id,
+            "projects": [
+                {
+                    "id": project.project_id,
+                    "title": project.title,
+                    "path": str(project.path),
+                    "books": project.books,
+                    "task_type": project.config.task_type,
+                    "source_label": project.config.source_label,
+                    "target_label": project.config.target_label,
+                }
+                for project in sorted(
+                    self._projects.values(), key=lambda item: item.title.casefold()
+                )
+            ],
+        }
+
+
 def start_review_server(
     config: PipelineConfig,
     *,
@@ -238,8 +389,13 @@ def start_review_server(
     host: str = "127.0.0.1",
     port: int = 8765,
 ) -> RunningReviewServer:
-    repository = ReviewRepository(config=config, book=book, profile=profile)
-    server = ReviewHTTPServer((host, port), repository)
+    server = _build_review_http_server(
+        config,
+        book=book,
+        profile=profile,
+        host=host,
+        port=port,
+    )
     thread = threading.Thread(
         target=server.serve_forever,
         name="jerome-reviewer",
@@ -247,6 +403,22 @@ def start_review_server(
     )
     thread.start()
     return RunningReviewServer(server=server, thread=thread)
+
+
+def _build_review_http_server(
+    config: PipelineConfig,
+    *,
+    book: int,
+    profile: str,
+    host: str,
+    port: int,
+) -> ReviewHTTPServer:
+    repository = ReviewRepository(config=config, book=book, profile=profile)
+    return ReviewHTTPServer(
+        (host, port),
+        repository,
+        ReviewProjectCatalog(config),
+    )
 
 
 def serve_review(
@@ -258,8 +430,13 @@ def serve_review(
     port: int = 8765,
     open_browser: bool = True,
 ) -> None:
-    repository = ReviewRepository(config=config, book=book, profile=profile)
-    server = ReviewHTTPServer((host, port), repository)
+    server = _build_review_http_server(
+        config,
+        book=book,
+        profile=profile,
+        host=host,
+        port=port,
+    )
     actual_host, actual_port = server.server_address[:2]
     api_url = f"http://{actual_host}:{actual_port}/"
 

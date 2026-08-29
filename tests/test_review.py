@@ -13,7 +13,7 @@ from pathlib import Path
 from interpres.cache import StageCache, canonical_digest
 from interpres.config import PipelineConfig, load_config
 from interpres.review import ReviewRepository, build_review_view
-from interpres.review_server import start_review_server
+from interpres.review_server import _build_review_http_server, start_review_server
 
 
 def record(
@@ -1025,6 +1025,69 @@ class ReviewRepositoryTest(unittest.TestCase):
                 self.assertEqual(error["error"], "machine_artifacts_immutable")
             finally:
                 running.stop()
+
+    def test_http_api_can_switch_review_projects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            self.write_fixture(config)
+            project_root = Path(directory) / "projects" / "second-project"
+            data = copy.deepcopy(config.data)
+            data["project"] = {
+                "id": "second-project",
+                "title": "Second Project",
+                "task_type": "translation",
+                "labels": {"source": "Latin", "target": "English"},
+            }
+            data["paths"]["artifacts"] = str(project_root / "artifacts")
+            data["paths"]["cache"] = str(project_root / "cache")
+            data["paths"]["editorial_reviews"] = str(project_root / "editorial")
+            project_root.mkdir(parents=True)
+            project_config = PipelineConfig(
+                path=project_root / "pipeline.yaml",
+                root=project_root,
+                data=data,
+            )
+            (project_root / "pipeline.yaml").write_text(
+                json.dumps(data), encoding="utf-8"
+            )
+            self.write_fixture(project_config)
+
+            running = start_review_server(config, port=0)
+            try:
+                with urllib.request.urlopen(running.url + "api/projects", timeout=5) as response:
+                    projects = json.loads(response.read())
+                self.assertIn(
+                    "second-project",
+                    {project["id"] for project in projects["projects"]},
+                )
+                with urllib.request.urlopen(
+                    running.url + "api/chunks?project=second-project&book=1",
+                    timeout=5,
+                ) as response:
+                    overview = json.loads(response.read())
+                self.assertEqual(overview["chunks"][0]["final_status"], "corrected")
+                self.assertEqual(overview["book"], 1)
+            finally:
+                running.stop()
+
+    def test_blocking_review_server_path_has_project_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            server = _build_review_http_server(
+                config,
+                book=1,
+                profile="production",
+                host="127.0.0.1",
+                port=0,
+            )
+            try:
+                self.assertEqual(server.repository.book, 1)
+                self.assertEqual(
+                    server.catalog.to_api()["default_project_id"],
+                    config.project_id,
+                )
+            finally:
+                server.server_close()
 
 
 class ProjectAwareReviewRegressionTest(unittest.TestCase):

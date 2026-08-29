@@ -23,6 +23,7 @@
   .masthead { position: sticky; height: 66px; }
   .sidebar { position: static; height: auto; max-height: 240px; border-right: 0; border-bottom: 1px solid var(--line); }
   .sidebar-heading, .sidebar-search { display: none; }
+  .project-switcher { grid-template-columns: minmax(0, 1fr); padding: .6rem .75rem; }
   .chunk-list { display: flex; overflow-x: auto; }
   .chunk-link { min-width: 220px; }
   .review-main { padding: .75rem; }

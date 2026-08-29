@@ -283,12 +283,30 @@ export interface ChunkOverview {
   artifact_errors: Record<string, unknown>[];
 }
 
+export interface ReviewProjectSummary {
+  id: string;
+  title: string;
+  path: string;
+  books: number[];
+  task_type: string;
+  source_label: string;
+  target_label: string;
+}
+
+export interface ReviewProjectCatalog {
+  default_project_id: string;
+  projects: ReviewProjectSummary[];
+}
+
 export type ReviewMode = 'review' | 'focus' | 'clean';
 export type EditorMode = 'edit' | 'preview';
 export type IssueFilter = 'open' | 'resolved' | 'all';
 export type ReferenceTab = 'source' | 'machine';
 
 export interface AppState {
+  projectCatalog: ReviewProjectCatalog | null;
+  selectedProjectId: string | null;
+  selectedBook: number;
   overview: ChunkOverview | null;
   view: ReviewView | null;
   currentChunkId: string | null;

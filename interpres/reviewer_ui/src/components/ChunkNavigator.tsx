@@ -1,14 +1,29 @@
 import { useState } from 'preact/hooks';
-import type { ChunkOverview } from '../app/types';
+import type { ChunkOverview, ReviewProjectCatalog } from '../app/types';
 
 interface Props {
+  projectCatalog: ReviewProjectCatalog;
+  selectedProjectId: string;
+  selectedBook: number;
   overview: ChunkOverview;
   currentChunkId: string | null;
   onSelectChunk: (chunkId: string) => void;
+  onSelectProject: (projectId: string) => void;
+  onSelectBook: (book: number) => void;
 }
 
-export const ChunkNavigator = ({ overview, currentChunkId, onSelectChunk }: Props) => {
+export const ChunkNavigator = ({
+  projectCatalog,
+  selectedProjectId,
+  selectedBook,
+  overview,
+  currentChunkId,
+  onSelectChunk,
+  onSelectProject,
+  onSelectBook,
+}: Props) => {
   const [query, setQuery] = useState('');
+  const selectedProject = projectCatalog.projects.find((project) => project.id === selectedProjectId) || projectCatalog.projects[0];
 
   const filtered = overview.chunks.filter((chunk) => {
     if (!query.trim()) return true;
@@ -18,6 +33,30 @@ export const ChunkNavigator = ({ overview, currentChunkId, onSelectChunk }: Prop
 
   return (
     <aside className="sidebar" aria-label="Chunk navigation">
+      <div className="project-switcher">
+        <label htmlFor="project-select">Project</label>
+        <select
+          id="project-select"
+          value={selectedProjectId}
+          onChange={(event) => onSelectProject((event.target as HTMLSelectElement).value)}
+        >
+          {projectCatalog.projects.map((project) => (
+            <option key={project.id} value={project.id}>{project.title}</option>
+          ))}
+        </select>
+        <div className="project-switcher-row">
+          <span>{selectedProject?.source_label || 'Source'} → {selectedProject?.target_label || 'Target'}</span>
+          <select
+            aria-label="Book"
+            value={selectedBook}
+            onChange={(event) => onSelectBook(Number((event.target as HTMLSelectElement).value))}
+          >
+            {(selectedProject?.books || [overview.book]).map((book) => (
+              <option key={book} value={book}>Book {book}</option>
+            ))}
+          </select>
+        </div>
+      </div>
       <div className="sidebar-heading">
         <div>
           <p className="eyebrow">Book {overview.book}</p>

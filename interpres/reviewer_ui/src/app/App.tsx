@@ -11,17 +11,25 @@ import { IssueLedger } from '../components/IssueLedger/IssueLedger';
 import { EvidenceInspector } from '../components/Evidence/EvidenceInspector';
 import { DecisionTrail } from '../components/DecisionTrail/DecisionTrail';
 import { LoadingPanel, ErrorPanel } from '../components/LoadingPanel';
-import { getOverview, getChunk, saveRevision } from '../api/reviewApi';
+import { getProjects, getOverview, getChunk, saveRevision } from '../api/reviewApi';
 import type {
   AppState,
   EditorialAnnotation,
   IssueResolution,
+  ReviewProjectCatalog,
   ReviewIndex,
   ReviewView,
   SelectionTarget,
 } from './types';
 import { initialState } from './ReviewProvider';
 import { buildReviewIndex } from '../lib/annotations';
+
+const LAST_SELECTION_KEY = 'interpres.review.lastSelection';
+
+interface ProjectSelection {
+  projectId: string;
+  book: number;
+}
 
 function editorialPayload(view: ReviewView) {
   return (view.editorial?.latest as {
@@ -39,6 +47,30 @@ function resolutionMap(items: IssueResolution[] = []): Map<string, IssueResoluti
   return new Map(items.map((item) => [item.issue_id, { ...item }]));
 }
 
+function storedSelection(): Partial<ProjectSelection> {
+  try {
+    const raw = window.localStorage.getItem(LAST_SELECTION_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Partial<ProjectSelection>;
+    return {
+      projectId: typeof parsed.projectId === 'string' ? parsed.projectId : undefined,
+      book: Number.isFinite(Number(parsed.book)) ? Number(parsed.book) : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function chooseSelection(catalog: ReviewProjectCatalog): ProjectSelection {
+  const params = new URLSearchParams(window.location.search);
+  const stored = storedSelection();
+  const projectId = params.get('project') || stored.projectId || catalog.default_project_id;
+  const project = catalog.projects.find((item) => item.id === projectId) || catalog.projects[0];
+  const requestedBook = Number(params.get('book') || stored.book || project?.books[0] || 1);
+  const book = project?.books.includes(requestedBook) ? requestedBook : project?.books[0] || 1;
+  return { projectId: project?.id || catalog.default_project_id, book };
+}
+
 export const App = () => {
   const [state, setState] = useState<AppState>({ ...initialState, loading: true });
   const [editorialText, setEditorialText] = useState('');
@@ -47,8 +79,7 @@ export const App = () => {
   const [referenceMode, setReferenceMode] = useState<'latin' | 'machine'>('latin');
 
   useEffect(() => {
-    const preferred = new URLSearchParams(window.location.search).get('chunk');
-    void loadOverview(preferred);
+    void initialize();
   }, []);
 
   useEffect(() => {
@@ -66,19 +97,18 @@ export const App = () => {
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [state.dirty]);
 
-  const loadOverview = async (preferredChunk: string | null = state.currentChunkId) => {
+  const currentSelection = (): ProjectSelection | null => {
+    if (!state.selectedProjectId) return null;
+    return { projectId: state.selectedProjectId, book: state.selectedBook };
+  };
+
+  const initialize = async () => {
     setState((prev) => ({ ...prev, loading: true, error: null }));
     try {
-      const overview = await getOverview();
-      const desired = overview.chunks.some((chunk) => chunk.chunk_id === preferredChunk)
-        ? preferredChunk
-        : overview.chunks[0]?.chunk_id || null;
-      if (!desired) {
-        setState((prev) => ({ ...prev, overview, loading: false, view: null }));
-        return;
-      }
-      const view = await getChunk(desired);
-      installView(overview, view, desired);
+      const catalog = await getProjects();
+      const selection = chooseSelection(catalog);
+      const preferred = new URLSearchParams(window.location.search).get('chunk');
+      await loadOverview(preferred, selection, catalog);
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -88,7 +118,82 @@ export const App = () => {
     }
   };
 
-  const installView = (overview: AppState['overview'], view: ReviewView, chunkId: string) => {
+  const loadOverview = async (
+    preferredChunk: string | null = state.currentChunkId,
+    selection: ProjectSelection | null = currentSelection(),
+    catalog: ReviewProjectCatalog | null = state.projectCatalog,
+  ) => {
+    if (!selection || !catalog) {
+      await initialize();
+      return;
+    }
+    setState((prev) => ({ ...prev, loading: true, error: null }));
+    try {
+      const overview = await getOverview(selection);
+      const desired = overview.chunks.some((chunk) => chunk.chunk_id === preferredChunk)
+        ? preferredChunk
+        : overview.chunks[0]?.chunk_id || null;
+      if (!desired) {
+        installEmptyOverview(catalog, overview, selection);
+        return;
+      }
+      const view = await getChunk(desired, selection);
+      installView(catalog, overview, view, desired, selection);
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : String(error),
+        loading: false,
+      }));
+    }
+  };
+
+  const rememberSelection = (selection: ProjectSelection, chunkId: string | null) => {
+    window.localStorage.setItem(LAST_SELECTION_KEY, JSON.stringify(selection));
+    const url = new URL(window.location.href);
+    url.searchParams.set('project', selection.projectId);
+    url.searchParams.set('book', String(selection.book));
+    if (chunkId) url.searchParams.set('chunk', chunkId);
+    else url.searchParams.delete('chunk');
+    window.history.replaceState(null, '', url);
+  };
+
+  const installEmptyOverview = (
+    catalog: ReviewProjectCatalog,
+    overview: AppState['overview'],
+    selection: ProjectSelection,
+  ) => {
+    setEditorialText('');
+    setSaveMessage(null);
+    setForensicsOpen(false);
+    setState((prev) => ({
+      ...prev,
+      projectCatalog: catalog,
+      selectedProjectId: selection.projectId,
+      selectedBook: selection.book,
+      overview,
+      view: null,
+      reviewIndex: null,
+      currentChunkId: null,
+      selectedReviewTarget: null,
+      selectedUnit: null,
+      annotations: [],
+      resolutions: new Map(),
+      dirty: false,
+      saving: false,
+      loading: false,
+      error: null,
+    }));
+    rememberSelection(selection, null);
+  };
+
+  const installView = (
+    catalog: ReviewProjectCatalog,
+    overview: AppState['overview'],
+    view: ReviewView,
+    chunkId: string,
+    selection: ProjectSelection,
+  ) => {
     const editorial = editorialPayload(view);
     const reviewIndex = buildReviewIndex(view as unknown as Record<string, unknown>) as unknown as ReviewIndex;
     setEditorialText(editorial?.translation || view.machine.final_draft || '');
@@ -96,6 +201,9 @@ export const App = () => {
     setForensicsOpen(false);
     setState((prev) => ({
       ...prev,
+      projectCatalog: catalog,
+      selectedProjectId: selection.projectId,
+      selectedBook: selection.book,
       overview,
       view,
       reviewIndex,
@@ -111,16 +219,14 @@ export const App = () => {
       loading: false,
       error: null,
     }));
-    const url = new URL(window.location.href);
-    url.searchParams.set('chunk', chunkId);
-    window.history.replaceState(null, '', url);
+    rememberSelection(selection, chunkId);
   };
 
-  const loadChunk = async (chunkId: string) => {
+  const loadChunk = async (chunkId: string, selection: ProjectSelection = currentSelection() || { projectId: '', book: 1 }) => {
     setState((prev) => ({ ...prev, loading: true, error: null }));
     try {
-      const view = await getChunk(chunkId);
-      installView(state.overview, view, chunkId);
+      const view = await getChunk(chunkId, selection);
+      installView(state.projectCatalog as ReviewProjectCatalog, state.overview, view, chunkId, selection);
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -133,7 +239,22 @@ export const App = () => {
   const requestChunk = (chunkId: string | null) => {
     if (!chunkId || chunkId === state.currentChunkId) return;
     if (state.dirty && !window.confirm('Discard unsaved editorial changes and open another chunk?')) return;
-    void loadChunk(chunkId);
+    const selection = currentSelection();
+    if (!selection) return;
+    void loadChunk(chunkId, selection);
+  };
+
+  const requestProject = (projectId: string) => {
+    if (!state.projectCatalog || projectId === state.selectedProjectId) return;
+    if (state.dirty && !window.confirm('Discard unsaved editorial changes and open another project?')) return;
+    const project = state.projectCatalog.projects.find((item) => item.id === projectId);
+    void loadOverview(null, { projectId, book: project?.books[0] || 1 }, state.projectCatalog);
+  };
+
+  const requestBook = (book: number) => {
+    if (!state.projectCatalog || !state.selectedProjectId || book === state.selectedBook) return;
+    if (state.dirty && !window.confirm('Discard unsaved editorial changes and open another book?')) return;
+    void loadOverview(null, { projectId: state.selectedProjectId, book }, state.projectCatalog);
   };
 
   const handleSaveRevision = async (revisionState: 'draft' | 'approved') => {
@@ -150,7 +271,9 @@ export const App = () => {
         machine_final_digest: state.view.machine.final_draft_digest,
         issue_resolutions: Array.from(state.resolutions.values()),
       };
-      const result = await saveRevision(state.currentChunkId, payload);
+      const selection = currentSelection();
+      if (!selection) throw new Error('No review project is selected.');
+      const result = await saveRevision(state.currentChunkId, payload, selection);
       const savedEditorial = (result.editorial.latest as { editorial?: { annotations?: EditorialAnnotation[]; issue_resolutions?: IssueResolution[] } } | null)?.editorial;
       setState((prev) => ({
         ...prev,
@@ -219,13 +342,42 @@ export const App = () => {
 
   if (state.loading) return <LoadingPanel />;
   if (state.error) return <ErrorPanel error={state.error} onRetry={() => void loadOverview()} />;
-  if (!state.view || !state.overview) return <ErrorPanel error="No reviewable chunks are available." onRetry={() => void loadOverview()} />;
+  if (!state.overview || !state.projectCatalog || !state.selectedProjectId) return <ErrorPanel error="No reviewable chunks are available." onRetry={() => void loadOverview()} />;
+  if (!state.view) {
+    return (
+      <div className={`app-shell review-mode-${state.reviewMode}${state.focusEditor ? ' editor-focus-mode' : ''}`}>
+        <AppHeader onRefresh={requestRefresh} />
+        <ChunkNavigator
+          projectCatalog={state.projectCatalog}
+          selectedProjectId={state.selectedProjectId}
+          selectedBook={state.selectedBook}
+          overview={state.overview}
+          currentChunkId={state.currentChunkId}
+          onSelectChunk={requestChunk}
+          onSelectProject={requestProject}
+          onSelectBook={requestBook}
+        />
+        <main className="review-main" id="review-main" tabIndex={-1}>
+          <ErrorPanel error="No reviewable chunks are available for this project/book." onRetry={() => void loadOverview()} />
+        </main>
+      </div>
+    );
+  }
   const sourceLabel = state.view.source.label || 'Latin';
 
   return (
     <div className={`app-shell review-mode-${state.reviewMode}${state.focusEditor ? ' editor-focus-mode' : ''}`}>
       <AppHeader onRefresh={requestRefresh} />
-      <ChunkNavigator overview={state.overview} currentChunkId={state.currentChunkId} onSelectChunk={requestChunk} />
+      <ChunkNavigator
+        projectCatalog={state.projectCatalog}
+        selectedProjectId={state.selectedProjectId}
+        selectedBook={state.selectedBook}
+        overview={state.overview}
+        currentChunkId={state.currentChunkId}
+        onSelectChunk={requestChunk}
+        onSelectProject={requestProject}
+        onSelectBook={requestBook}
+      />
       <main className="review-main" id="review-main" tabIndex={-1}>
         <div id="review-content">
           <ChunkToolbar

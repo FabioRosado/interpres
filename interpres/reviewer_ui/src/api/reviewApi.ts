@@ -1,4 +1,4 @@
-import type { ChunkOverview, ReviewView, EditorialState } from '../app/types';
+import type { ChunkOverview, ReviewProjectCatalog, ReviewView, EditorialState } from '../app/types';
 
 const API_BASE = '/api';
 
@@ -19,19 +19,33 @@ export async function requestJson<T>(path: string, options?: RequestInit): Promi
   return payload as T;
 }
 
-export async function getOverview(): Promise<ChunkOverview> {
-  return requestJson<ChunkOverview>('/chunks');
+export interface ReviewSelection {
+  projectId: string;
+  book: number;
 }
 
-export async function getChunk(chunkId: string): Promise<ReviewView> {
-  return requestJson<ReviewView>(`/chunks/${encodeURIComponent(chunkId)}`);
+function selectionQuery(selection: ReviewSelection): string {
+  return `?project=${encodeURIComponent(selection.projectId)}&book=${encodeURIComponent(String(selection.book))}`;
+}
+
+export async function getProjects(): Promise<ReviewProjectCatalog> {
+  return requestJson<ReviewProjectCatalog>('/projects');
+}
+
+export async function getOverview(selection: ReviewSelection): Promise<ChunkOverview> {
+  return requestJson<ChunkOverview>(`/chunks${selectionQuery(selection)}`);
+}
+
+export async function getChunk(chunkId: string, selection: ReviewSelection): Promise<ReviewView> {
+  return requestJson<ReviewView>(`/chunks/${encodeURIComponent(chunkId)}${selectionQuery(selection)}`);
 }
 
 export async function saveRevision(
   chunkId: string,
   payload: Record<string, unknown>,
+  selection: ReviewSelection,
 ): Promise<{ saved: boolean; revision: Record<string, unknown>; editorial: EditorialState }> {
-  return requestJson(`/chunks/${encodeURIComponent(chunkId)}/editorial/revisions`, {
+  return requestJson(`/chunks/${encodeURIComponent(chunkId)}/editorial/revisions${selectionQuery(selection)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

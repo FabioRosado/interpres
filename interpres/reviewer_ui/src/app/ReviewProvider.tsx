@@ -2,6 +2,9 @@ import { buildReviewIndex, targetFromUnit } from '../lib/annotations';
 import type { AppState, AppAction, SelectionTarget, ReviewIndex, IssueResolution } from './types';
 
 export const initialState: AppState = {
+  projectCatalog: null,
+  selectedProjectId: null,
+  selectedBook: 1,
   overview: null,
   view: null,
   currentChunkId: null,
