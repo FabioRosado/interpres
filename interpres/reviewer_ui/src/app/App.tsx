@@ -220,6 +220,7 @@ export const App = () => {
   if (state.loading) return <LoadingPanel />;
   if (state.error) return <ErrorPanel error={state.error} onRetry={() => void loadOverview()} />;
   if (!state.view || !state.overview) return <ErrorPanel error="No reviewable chunks are available." onRetry={() => void loadOverview()} />;
+  const sourceLabel = state.view.source.label || 'Latin';
 
   return (
     <div className={`app-shell review-mode-${state.reviewMode}${state.focusEditor ? ' editor-focus-mode' : ''}`}>
@@ -247,7 +248,7 @@ export const App = () => {
 
           <div className="editor-workspace">
             <div className="workstation-grid">
-              <aside className="reference-sidebar" aria-label="Authoritative Latin and immutable Machine Final">
+              <aside className="reference-sidebar" aria-label={`Authoritative Source · ${sourceLabel} and immutable Machine Final`}>
                 <div className="reference-tabs" role="tablist" aria-label="Reference text">
                   <button
                     type="button"
@@ -257,7 +258,7 @@ export const App = () => {
                     className={referenceMode === 'latin' ? 'active' : ''}
                     onClick={() => setReferenceMode('latin')}
                   >
-                    Latin
+                    {sourceLabel}
                   </button>
                   <button
                     type="button"

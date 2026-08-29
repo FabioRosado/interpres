@@ -7,10 +7,15 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
-from .checks import CURATED_PROPER_NAME_EQUIVALENTS
+from .checks import (
+    CURATED_PROPER_NAME_EQUIVALENTS,
+    DEFAULT_ARCHAIC_RESIDUE,
+    modernization_check_text,
+)
+from .tasks import task_profile_from_chunk
 
 WITNESS_CONTRACT_VERSION = 4
-WITNESS_VALIDATION_POLICY_VERSION = 7
+WITNESS_VALIDATION_POLICY_VERSION = 8
 WITNESS_QUORUM_POLICY_VERSION = 1
 MAX_CONTIGUOUS_LATIN_COPY_WORDS = 7
 MIN_CONTEXT_ANCHOR_MATCHES = 2
@@ -19,6 +24,7 @@ META_PREAMBLE_RE = re.compile(
     r"^\s*(?:here\s+is|below\s+is|the\s+following\s+is).*?translation",
     re.IGNORECASE | re.DOTALL,
 )
+QUOTED_TEXT_RE = re.compile(r'"[^"]+"|“[^”]+”')
 
 
 def expected_source_unit_ids(chunk: dict[str, Any]) -> list[str]:
@@ -28,6 +34,23 @@ def expected_source_unit_ids(chunk: dict[str, Any]) -> list[str]:
         for unit in units
         if isinstance(unit, dict) and unit.get("source_unit_id")
     ]
+
+
+def _configured_archaic_terms(chunk: dict[str, Any]) -> set[str]:
+    checks = chunk.get("checks") if isinstance(chunk.get("checks"), dict) else {}
+    raw = checks.get("archaic_residue_terms")
+    if isinstance(raw, list):
+        configured = {str(item).casefold() for item in raw if str(item).strip()}
+        if configured:
+            return configured
+    return set(DEFAULT_ARCHAIC_RESIDUE)
+
+
+def _modernization_word_set(chunk: dict[str, Any], value: str) -> set[str]:
+    return {
+        word.casefold()
+        for word in WORD_RE.findall(modernization_check_text(chunk, value))
+    }
 
 
 def witness_contract_schema(chunk: dict[str, Any]) -> dict[str, Any]:
@@ -390,7 +413,8 @@ def estimate_witness_output_budget(
 ) -> dict[str, Any]:
     """Conservative provider-free preflight for the plain witness contract."""
 
-    target_bytes = len(str(chunk.get("target_latin") or "").encode("utf-8"))
+    task = task_profile_from_chunk(chunk)
+    target_bytes = len(task.source_text(chunk).encode("utf-8"))
     target_token_proxy = math.ceil(target_bytes / 4)
     # Cached complete free-text witnesses in chunks 1-3 used about 0.97-1.07
     # output tokens per target token proxy. Keep 20% translation headroom.
@@ -440,6 +464,7 @@ def validate_witness_record(
 ) -> dict[str, Any]:
     """Validate an immutable witness record as an untrusted proposal."""
 
+    task = task_profile_from_chunk(chunk)
     checks: list[dict[str, Any]] = []
 
     def check(name: str, passed: bool, detail: Any, *, blocking: bool = True) -> None:
@@ -462,15 +487,16 @@ def validate_witness_record(
     last_attempt = attempts[-1] if attempts and isinstance(attempts[-1], dict) else {}
     fixture = model.get("provider") == "challenge_fixture"
 
-    stored_target = (
-        ((record.get("cache_material") or {}).get("inputs") or {}).get("target_latin")
-    )
+    stored_inputs = ((record.get("cache_material") or {}).get("inputs") or {})
+    stored_target = stored_inputs.get("target_latin")
+    if task.is_modernization and stored_target is None:
+        stored_target = stored_inputs.get("source_text")
     check(
         "exact_target_input",
-        stored_target == chunk.get("target_latin"),
+        stored_target == task.source_text(chunk),
         {
             "stored_chars": len(stored_target) if isinstance(stored_target, str) else None,
-            "expected_chars": len(str(chunk.get("target_latin") or "")),
+            "expected_chars": len(task.source_text(chunk)),
         },
     )
     check("raw_response_persisted", bool(raw_text), {"raw_chars": len(raw_text)})
@@ -600,15 +626,15 @@ def validate_witness_record(
     )
     check("nonempty_translation", bool(translation.strip()), {"translation_chars": len(translation)})
 
-    context_leakage = _context_leakage_signal(chunk, translation)
-    check(
-        "no_context_leakage",
-        not context_leakage["suspicious"],
-        context_leakage,
-    )
+    if task.is_translation:
+        context_leakage = _context_leakage_signal(chunk, translation)
+        check(
+            "no_context_leakage",
+            not context_leakage["suspicious"],
+            context_leakage,
+        )
 
     segment_contract = contract_format == "witness_json_v3"
-    stored_inputs = ((record.get("cache_material") or {}).get("inputs") or {})
     if segment_contract or plain_contract:
         request_context = {
             "context_before": stored_inputs.get("request_context_before"),
@@ -753,14 +779,15 @@ def validate_witness_record(
         blocking=not plain_contract,
     )
 
-    missing_global_names = _missing_proper_name_multiplicity(
-        str(chunk.get("target_latin") or ""), translation
-    )
-    check(
-        "whole_target_name_multiplicity",
-        fixture or not missing_global_names,
-        {"missing": missing_global_names},
-    )
+    if task.is_translation:
+        missing_global_names = _missing_proper_name_multiplicity(
+            task.source_text(chunk), translation
+        )
+        check(
+            "whole_target_name_multiplicity",
+            fixture or not missing_global_names,
+            {"missing": missing_global_names},
+        )
 
     if segment_contract:
         unit_text = {
@@ -842,25 +869,47 @@ def validate_witness_record(
         ),
     )
 
-    copied = _longest_source_copy(str(chunk.get("target_latin") or ""), translation)
-    check(
-        "no_suspicious_source_copy",
-        copied["word_count"] <= MAX_CONTIGUOUS_LATIN_COPY_WORDS,
-        {**copied, "maximum_words": MAX_CONTIGUOUS_LATIN_COPY_WORDS},
-    )
-    latin_words = max(1, len(WORD_RE.findall(str(chunk.get("target_latin") or ""))))
+    if task.is_translation:
+        copied = _longest_source_copy(task.source_text(chunk), translation)
+        check(
+            "no_suspicious_source_copy",
+            copied["word_count"] <= MAX_CONTIGUOUS_LATIN_COPY_WORDS,
+            {**copied, "maximum_words": MAX_CONTIGUOUS_LATIN_COPY_WORDS},
+        )
+    latin_words = max(1, len(WORD_RE.findall(task.source_text(chunk))))
     english_words = len(WORD_RE.findall(translation))
     ratio = english_words / latin_words
+    length_limits = [0.6, 1.9] if task.is_modernization else [0.45, 2.2]
     check(
         "coverage_length_signal",
-        0.45 <= ratio <= 2.2,
+        length_limits[0] <= ratio <= length_limits[1],
         {
             "latin_words": latin_words,
             "english_words": english_words,
             "ratio": round(ratio, 3),
-            "limits": [0.45, 2.2],
+            "limits": length_limits,
         },
     )
+
+    if task.is_modernization:
+        archaic_terms = _configured_archaic_terms(chunk)
+        source_terms = _modernization_word_set(chunk, task.source_text(chunk))
+        target_terms = _modernization_word_set(chunk, translation)
+        introduced = [
+            term
+            for term in sorted(archaic_terms)
+            if term in target_terms and term not in source_terms
+        ]
+        check(
+            "no_archaic_introduction",
+            not introduced,
+            {
+                "introduced_terms": introduced,
+                "configured_terms": sorted(archaic_terms),
+                "ordinary_quotation_marks_protected": False,
+                "explicit_protected_spans_ignored": True,
+            },
+        )
 
     blocking_failures = [item["check"] for item in checks if item["blocking"]]
     return {

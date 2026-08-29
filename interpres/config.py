@@ -155,6 +155,93 @@ class PipelineConfig:
             raise ConfigurationError(f"{name} must be an object")
         return copy.deepcopy(value)
 
+    @property
+    def project(self) -> dict[str, Any]:
+        value = self.data.get("project", {})
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+    @property
+    def project_id(self) -> str:
+        configured = self.project.get("id") or self.project.get("name")
+        if configured:
+            return str(configured)
+        if self.root.name != "translation":
+            return self.root.name
+        return "jerome-ezekiel"
+
+    @property
+    def task_type(self) -> str:
+        return str(self.project.get("task_type") or "translation")
+
+    @property
+    def operation_label(self) -> str:
+        return str(self.project.get("operation_label") or self.task_type)
+
+    @property
+    def source_language(self) -> str:
+        language = self.project.get("source_language")
+        if not language:
+            language = self.project.get("languages", {}).get("source") if isinstance(self.project.get("languages"), dict) else None
+        return str(language or "la")
+
+    @property
+    def target_language(self) -> str:
+        language = self.project.get("target_language")
+        if not language:
+            language = self.project.get("languages", {}).get("target") if isinstance(self.project.get("languages"), dict) else None
+        return str(language or "en")
+
+    @property
+    def source_label(self) -> str:
+        labels = self.project.get("labels", {})
+        if isinstance(labels, Mapping) and labels.get("source"):
+            return str(labels["source"])
+        defaults = {
+            "la": "Latin",
+            "historical_english": "Historical English",
+            "modern_english": "Modern English",
+            "en": "English",
+        }
+        return defaults.get(self.source_language, self.source_language.replace("_", " ").title())
+
+    @property
+    def target_label(self) -> str:
+        labels = self.project.get("labels", {})
+        if isinstance(labels, Mapping) and labels.get("target"):
+            return str(labels["target"])
+        defaults = {
+            "la": "Latin",
+            "historical_english": "Historical English",
+            "modern_english": "Modern English",
+            "en": "English",
+        }
+        return defaults.get(self.target_language, self.target_language.replace("_", " ").title())
+
+    @property
+    def source_format(self) -> str:
+        source = self.section("source")
+        return str(source.get("format") or self.project.get("source_format") or "corpus-corporum")
+
+    def stage_enabled(self, stage: str) -> bool:
+        stages = self.data.get("stages", {})
+        if not isinstance(stages, Mapping):
+            return True
+        raw = stages.get(stage, {})
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, Mapping):
+            return raw.get("enabled", True) is not False
+        return True
+
+    def enabled_evidence_kinds(self) -> set[str] | None:
+        evidence = self.section("evidence")
+        raw = evidence.get("enabled_kinds")
+        if raw is None:
+            return None
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise ConfigurationError("evidence.enabled_kinds must be a list of strings")
+        return set(raw)
+
 
 def _model_spec(
     role: str, raw: Mapping[str, Any], *, profile: str = "production"

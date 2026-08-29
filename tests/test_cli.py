@@ -7,11 +7,45 @@ import unittest
 from pathlib import Path
 
 from interpres.cache import StageCache, stage_record
-from interpres.cli import _failed_chunk_jobs, build_parser
+from interpres.cli import (
+    _chunk_label,
+    _format_duration,
+    _progress_descriptor,
+    _progress_prefix,
+    _failed_chunk_jobs,
+    build_parser,
+)
 from interpres.config import PipelineConfig, load_config
 
 
 class FailedChunkCommandTest(unittest.TestCase):
+    def test_progress_duration_and_chunk_labels_are_human_readable(self):
+        self.assertEqual(_format_duration(999), "999ms")
+        self.assertEqual(_format_duration(14004), "14s")
+        self.assertEqual(_format_duration(175384), "2m 55s")
+        chunk = {
+            "chunk_id": (
+                "book01-homily-001-section-014.p001--"
+                "homily-001-section-014.p001-f7c1950ece"
+            ),
+            "source": {
+                "source_unit_ids": ["book01-homily-001-section-014.p001"],
+                "pages": ["0101A"],
+            },
+            "source_units": [],
+        }
+        self.assertEqual(_chunk_label(chunk), "Homily 1 section 14.p001")
+        descriptor = _progress_descriptor(
+            chunk,
+            selected_index=14,
+            selected_total=22,
+            global_index=14,
+        )
+        self.assertEqual(
+            _progress_prefix(descriptor),
+            "[14/22 | chunk 14] Homily 1 section 14.p001 (f7c1950ece)",
+        )
+
     def config(self, directory: str) -> PipelineConfig:
         base = load_config()
         data = copy.deepcopy(base.data)

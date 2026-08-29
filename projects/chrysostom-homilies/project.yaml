@@ -1,0 +1,21 @@
+project:
+  id: chrysostom-homilies
+  name: chrysostom-homilies
+  title: "Chrysostom Homily Modernization"
+  description: "Historical English to modern English modernization for the NPNF Chrysostom homilies on Matthew."
+  author: "John Chrysostom"
+  work: "Homilies on the Gospel of St. Matthew"
+  corpus: "Nicene and Post-Nicene Fathers, First Series, Volume 10"
+  source_format: "homily_directory"
+  task_type: "modernization"
+  operation_label: "modernization"
+  source_language: "historical_english"
+  target_language: "modern_english"
+  labels:
+    source: "Historical English"
+    target: "Modern English"
+  books:
+    "1": "../../chrysostom_output/clean"
+  notes_path: "../../chrysostom_output/notes"
+  licensing:
+    bundled_text: "Public-domain NPNF source extracted locally from npnf110.pdf."

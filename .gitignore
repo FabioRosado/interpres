@@ -18,6 +18,8 @@ book1.txt
 # Generated artifacts
 artifacts/
 .cache/
+projects/*/artifacts/
+projects/*/.cache/
 
 # IDE
 .idea/

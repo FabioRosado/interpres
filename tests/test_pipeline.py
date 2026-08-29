@@ -1201,6 +1201,17 @@ class PipelineVerticalTest(unittest.TestCase):
                 len(prosecutor_request.encode("utf-8")),
             )
             self.assertTrue(prosecutor_inputs["input_budget"]["fits"])
+            self.assertIn("response_schema_digest", prosecutor_inputs)
+            prosecutor_schemas = [
+                schema
+                for role, schema in provider.response_schemas
+                if role == "prosecutor"
+            ]
+            self.assertEqual(len(prosecutor_schemas), 1)
+            self.assertEqual(
+                set(prosecutor_schemas[0]["required"]),
+                {"status", "summary", "challenges", "evidence_requests"},
+            )
             adjudicator_schemas = [
                 schema
                 for role, schema in provider.response_schemas

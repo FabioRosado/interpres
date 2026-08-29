@@ -12,6 +12,14 @@ from .config import PipelineConfig
 
 BOOK_HEADING_RE = re.compile(r"^\s*LIBER\s+([A-Z]+)\.?\s*$", re.IGNORECASE)
 PAGE_RE = re.compile(r"-*\[page\s+([0-9]+[A-D])\]-*", re.IGNORECASE)
+GENERIC_PAGE_RE = re.compile(r"^\s*\[page\s+([^\]]+)\]\s*$", re.IGNORECASE)
+HOMILY_HEADING_RE = re.compile(r"^\s*#\s*Homily\s+([IVXLCDM0-9]+)\s*:\s*(.+?)\s*$", re.IGNORECASE)
+HOMILY_FILE_RE = re.compile(r"^homily-(\d{3})\.txt$", re.IGNORECASE)
+NPNF_HOMILY_OPENING_RE = re.compile(
+    r"^\s*Homily\s+([IVXLCDM]+)\.\s*(.*)$", re.IGNORECASE | re.DOTALL
+)
+PRINTED_SECTION_RE = re.compile(r"(?m)(?:^|\n\n)(\d{1,2})\.\s+(?=[A-Z“])")
+SECTION_HEADING_RE = re.compile(r"^\s*##\s*(.+?)\s*$")
 INLINE_NOTE_RE = re.compile(r"\[(\d+)\]")
 FOOTNOTE_SEPARATOR_RE = re.compile(r"^\s*_{10,}\s*$")
 FOOTNOTE_DEFINITION_RE = re.compile(r"^\s*(\d+)\s*:\s*(.+?)\s*$")
@@ -34,6 +42,25 @@ def _sha256_text(value: str) -> str:
 
 def _normalise_space(value: str) -> str:
     return re.sub(r"[ \t]+", " ", value).strip()
+
+
+def _roman_to_int(value: str) -> int:
+    numerals = {
+        "I": 1,
+        "V": 5,
+        "X": 10,
+        "L": 50,
+        "C": 100,
+        "D": 500,
+        "M": 1000,
+    }
+    total = 0
+    previous = 0
+    for char in reversed(value.upper()):
+        current = numerals[char]
+        total += -current if current < previous else current
+        previous = max(previous, current)
+    return total
 
 
 def _collect_footnotes(source_text: str) -> dict[str, deque[dict[str, str]]]:
@@ -322,6 +349,348 @@ def parse_source(
     }
 
 
+def parse_homily_source(
+    source_text: str,
+    *,
+    book: int,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Parse a small Markdown-like homily fixture into paragraph source units."""
+
+    source_metadata = dict(metadata or {})
+    units: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
+    page_markers: list[dict[str, Any]] = []
+    pieces: list[str] = []
+    clean_length = 0
+    current_homily = "1"
+    current_title = source_metadata.get("title") or "Sample Homily"
+    current_section: str | None = None
+    current_page: str | None = None
+    paragraph: list[str] = []
+    paragraph_start_raw = 0
+    raw_offset = 0
+    paragraph_count = 0
+
+    def flush_paragraph(raw_end: int) -> None:
+        nonlocal clean_length, paragraph, paragraph_count
+        if not paragraph:
+            return
+        text = _normalise_space(" ".join(paragraph))
+        paragraph = []
+        if not text:
+            return
+        if pieces:
+            pieces.append("\n\n")
+            clean_length += 2
+        start = clean_length
+        pieces.append(text)
+        clean_length += len(text)
+        paragraph_count += 1
+        homily_slug = re.sub(r"[^a-z0-9]+", "-", current_homily.casefold()).strip("-") or "1"
+        unit_id = f"book{book:02d}-homily-{homily_slug}-p{paragraph_count:03d}"
+        unit = {
+            "source_unit_id": unit_id,
+            "canonical_parent_id": unit_id,
+            "book": book,
+            "homily": current_homily,
+            "title": current_title,
+            "section": current_section,
+            "page": current_page,
+            "clean_start": start,
+            "clean_end": clean_length,
+            "raw_start": paragraph_start_raw,
+            "raw_end": raw_end,
+            "text": text,
+            "fingerprint": _sha256_text(text),
+            "part": None,
+            "annotation_ids": [],
+        }
+        units.append(unit)
+        for match in re.finditer(r"\b(?:[1-3]\s+)?[A-Z][a-z]+\s+\d+:\d+(?:-\d+)?\b", text):
+            annotation = {
+                "annotation_id": f"book{book:02d}-ann-{len(annotations)+1:05d}",
+                "type": "scripture_reference",
+                "reference": match.group(0),
+                "clean_offset": start + match.start(),
+                "offset": match.start(),
+                "source_unit_id": unit_id,
+                "context": text[max(0, match.start() - 70) : match.end() + 90],
+            }
+            annotations.append(annotation)
+            unit["annotation_ids"].append(annotation["annotation_id"])
+
+    for raw_line in source_text.splitlines(keepends=True):
+        line_raw_start = raw_offset
+        raw_offset += len(raw_line)
+        line = raw_line.rstrip("\r\n")
+        homily_match = HOMILY_HEADING_RE.match(line)
+        section_match = SECTION_HEADING_RE.match(line)
+        page_match = GENERIC_PAGE_RE.match(line)
+        if homily_match or section_match or page_match or not line.strip():
+            flush_paragraph(line_raw_start)
+        if homily_match:
+            current_homily = homily_match.group(1)
+            current_title = homily_match.group(2).strip()
+            current_section = None
+            continue
+        if section_match:
+            current_section = section_match.group(1).strip()
+            continue
+        if page_match:
+            current_page = page_match.group(1).strip()
+            page_markers.append(
+                {
+                    "page": current_page,
+                    "raw": line.strip(),
+                    "raw_start": line_raw_start,
+                    "raw_end": raw_offset,
+                    "clean_offset": clean_length,
+                }
+            )
+            continue
+        if not line.strip():
+            continue
+        if not paragraph:
+            paragraph_start_raw = line_raw_start
+        paragraph.append(line.strip())
+    flush_paragraph(len(source_text))
+    clean_text = "".join(pieces).strip()
+    return {
+        "schema_version": 1,
+        "book": book,
+        "heading": str(source_metadata.get("work") or current_title),
+        "metadata": source_metadata,
+        "source_fingerprint": _sha256_text(source_text),
+        "clean_fingerprint": _sha256_text(clean_text),
+        "text": clean_text,
+        "source_units": units,
+        "page_markers": page_markers,
+        "annotations": annotations,
+        "unmatched_footnote_definitions": {},
+    }
+
+
+def _read_homily_apparatus(notes_path: Path | None) -> list[dict[str, Any]]:
+    if notes_path is None or not notes_path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(notes_path.glob("homily-*.notes.txt")):
+        match = re.search(r"homily-(\d{3})\.notes\.txt$", path.name, re.IGNORECASE)
+        if not match:
+            continue
+        homily_number = int(match.group(1))
+        current: dict[str, Any] | None = None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if re.fullmatch(r"\d+", stripped):
+                if current is not None:
+                    current["text"] = _normalise_space(" ".join(current["lines"]))
+                    current.pop("lines", None)
+                    current["fingerprint"] = _sha256_text(current["text"])
+                    records.append(current)
+                current = {
+                    "apparatus_id": (
+                        f"homily-{homily_number:03d}-note-{int(stripped):04d}"
+                    ),
+                    "homily": homily_number,
+                    "homily_number": homily_number,
+                    "note_number": int(stripped),
+                    "section_number": None,
+                    "association": "homily_level",
+                    "source_file": path.name,
+                    "lines": [],
+                }
+                continue
+            if current is not None:
+                current["lines"].append(stripped)
+        if current is not None:
+            current["text"] = _normalise_space(" ".join(current["lines"]))
+            current.pop("lines", None)
+            current["fingerprint"] = _sha256_text(current["text"])
+            records.append(current)
+    return records
+
+
+def _printed_section_markers(text: str) -> list[re.Match[str]]:
+    """Return likely NPNF internal section markers, excluding wrapped citations."""
+
+    markers: list[re.Match[str]] = []
+    last_section = 1
+    for marker in PRINTED_SECTION_RE.finditer(text):
+        section_number = int(marker.group(1))
+        if not markers and section_number != 2:
+            continue
+        if section_number <= last_section or section_number > last_section + 2:
+            continue
+        markers.append(marker)
+        last_section = section_number
+    return markers
+
+
+def parse_homily_directory(
+    source_path: Path,
+    *,
+    book: int,
+    metadata: dict[str, Any] | None = None,
+    notes_path: Path | None = None,
+) -> dict[str, Any]:
+    """Parse cleaned NPNF homily files into section-level source units."""
+
+    if not source_path.exists() or not source_path.is_dir():
+        raise SourceParseError(f"Homily source directory not found: {source_path}")
+    source_metadata = dict(metadata or {})
+    files = [
+        path
+        for path in sorted(source_path.glob("homily-*.txt"))
+        if HOMILY_FILE_RE.match(path.name)
+    ]
+    if not files:
+        raise SourceParseError(f"No cleaned homily files found in {source_path}")
+
+    pieces: list[str] = []
+    units: list[dict[str, Any]] = []
+    clean_length = 0
+    source_manifest = []
+
+    def append_unit(
+        *,
+        homily_number: int,
+        homily_roman: str,
+        section_number: int,
+        section_explicit: bool,
+        text: str,
+        source_file: str,
+        raw_start: int,
+        raw_end: int,
+    ) -> None:
+        nonlocal clean_length
+        text = text.strip()
+        if not text:
+            return
+        if pieces:
+            pieces.append("\n\n")
+            clean_length += 2
+        start = clean_length
+        pieces.append(text)
+        clean_length += len(text)
+        section_id = (
+            f"book{book:02d}-homily-{homily_number:03d}-"
+            f"section-{section_number:03d}"
+        )
+        anchor = f"homily-{homily_number}-section-{section_number}"
+        unit = {
+            "source_unit_id": section_id,
+            "canonical_parent_id": section_id,
+            "book": book,
+            "work": source_metadata.get("work"),
+            "homily": homily_number,
+            "homily_number": homily_number,
+            "homily_roman": homily_roman,
+            "section": section_number,
+            "section_number": section_number,
+            "section_number_explicit": section_explicit,
+            "section_id": section_id,
+            "anchor": anchor,
+            "source_file": source_file,
+            "page": None,
+            "clean_start": start,
+            "clean_end": clean_length,
+            "raw_start": raw_start,
+            "raw_end": raw_end,
+            "text": text,
+            "paragraphs": [
+                {"index": index + 1, "text": paragraph}
+                for index, paragraph in enumerate(
+                    part.strip() for part in re.split(r"\n{2,}", text)
+                )
+                if paragraph
+            ],
+            "fingerprint": _sha256_text(text),
+            "part": None,
+            "annotation_ids": [],
+        }
+        units.append(unit)
+
+    for path in files:
+        file_match = HOMILY_FILE_RE.match(path.name)
+        assert file_match is not None
+        file_number = int(file_match.group(1))
+        raw_text = path.read_text(encoding="utf-8")
+        normalized = re.sub(r"\r\n?", "\n", raw_text).strip()
+        opening = NPNF_HOMILY_OPENING_RE.match(normalized)
+        if not opening:
+            raise SourceParseError(f"Missing homily heading in {path}")
+        homily_roman = opening.group(1).upper()
+        homily_number = _roman_to_int(homily_roman)
+        if homily_number != file_number:
+            raise SourceParseError(
+                f"Homily heading/file mismatch in {path}: {homily_roman}"
+            )
+        source_manifest.append(
+            {
+                "source_file": path.name,
+                "homily_number": homily_number,
+                "fingerprint": _sha256_text(raw_text),
+            }
+        )
+        markers = _printed_section_markers(normalized)
+        sections: list[tuple[int, int, int, bool]] = []
+        if markers and markers[0].start(1) > 0:
+            sections.append((1, 0, markers[0].start(1), False))
+        previous: re.Match[str] | None = None
+        for marker in markers:
+            if previous is not None:
+                sections.append(
+                    (
+                        int(previous.group(1)),
+                        previous.start(1),
+                        marker.start(1),
+                        True,
+                    )
+                )
+            previous = marker
+        if previous is not None:
+            sections.append(
+                (int(previous.group(1)), previous.start(1), len(normalized), True)
+            )
+        if not sections:
+            sections.append((1, 0, len(normalized), False))
+        for section_number, start, end, explicit in sections:
+            append_unit(
+                homily_number=homily_number,
+                homily_roman=homily_roman,
+                section_number=section_number,
+                section_explicit=explicit,
+                text=normalized[start:end],
+                source_file=path.name,
+                raw_start=start,
+                raw_end=end,
+            )
+
+    clean_text = "".join(pieces).strip()
+    return {
+        "schema_version": 1,
+        "book": book,
+        "heading": str(source_metadata.get("work") or "NPNF Chrysostom Homilies"),
+        "metadata": source_metadata,
+        "source_fingerprint": _sha256_text(
+            json.dumps(source_manifest, ensure_ascii=False, separators=(",", ":"))
+        ),
+        "clean_fingerprint": _sha256_text(clean_text),
+        "text": clean_text,
+        "source_units": units,
+        "source_sections": units,
+        "apparatus": _read_homily_apparatus(notes_path),
+        "page_markers": [],
+        "annotations": [],
+        "unmatched_footnote_definitions": {},
+        "source_files": source_manifest,
+    }
+
+
 def split_sentences(text: str) -> list[tuple[int, int, str]]:
     results: list[tuple[int, int, str]] = []
     start = 0
@@ -429,7 +798,17 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
     chunks: list[dict[str, Any]] = []
     cursor = 0
     while cursor < len(units):
-        remaining = len(units) - cursor
+        boundary_homily = units[cursor].get("homily_number")
+        group_end = cursor + 1
+        if boundary_homily is None:
+            group_end = len(units)
+        else:
+            while (
+                group_end < len(units)
+                and units[group_end].get("homily_number") == boundary_homily
+            ):
+                group_end += 1
+        remaining = group_end - cursor
         if remaining <= maximum:
             count = remaining
         else:
@@ -456,10 +835,10 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
         count = len(selected)
         start = selected[0]["clean_start"]
         end = selected[-1]["clean_end"]
-        target_latin = parsed["text"][start:end].strip()
-        actual_start = parsed["text"].find(target_latin, start, end + 1)
+        target_source = parsed["text"][start:end].strip()
+        actual_start = parsed["text"].find(target_source, start, end + 1)
         start = actual_start
-        end = start + len(target_latin)
+        end = start + len(target_source)
 
         before_units = units[max(0, cursor - context_units) : cursor]
         after_units = units[cursor + count : cursor + count + context_units]
@@ -506,6 +885,11 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
                 "clean_start": unit["clean_start"],
                 "clean_end": unit["clean_end"],
                 "page": unit.get("page"),
+                "homily_number": unit.get("homily_number"),
+                "section_number": unit.get("section_number"),
+                "section_number_explicit": unit.get("section_number_explicit"),
+                "section_id": unit.get("section_id"),
+                "anchor": unit.get("anchor"),
             }
             for unit in selected
         ]
@@ -516,6 +900,10 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
                 "clean_start": unit["clean_start"],
                 "clean_end": unit["clean_end"],
                 "page": unit.get("page"),
+                "homily_number": unit.get("homily_number"),
+                "section_number": unit.get("section_number"),
+                "section_id": unit.get("section_id"),
+                "anchor": unit.get("anchor"),
             }
             for unit in before_units
         ] + [
@@ -525,6 +913,10 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
                 "clean_start": unit["clean_start"],
                 "clean_end": unit["clean_end"],
                 "page": unit.get("page"),
+                "homily_number": unit.get("homily_number"),
+                "section_number": unit.get("section_number"),
+                "section_id": unit.get("section_id"),
+                "anchor": unit.get("anchor"),
             }
             for unit in after_units
         ]
@@ -544,8 +936,32 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
                 "book": parsed["book"],
                 "source": {
                     **parsed.get("metadata", {}),
+                    "project_id": parsed.get("project", {}).get("id"),
+                    "task_type": parsed.get("project", {}).get(
+                        "task_type", "translation"
+                    ),
+                    "source_language": parsed.get("project", {}).get(
+                        "source_language"
+                    ),
+                    "target_language": parsed.get("project", {}).get(
+                        "target_language"
+                    ),
                     "source_fingerprint": parsed["source_fingerprint"],
                     "source_unit_ids": unit_ids,
+                    "section_ids": list(
+                        dict.fromkeys(
+                            unit.get("section_id")
+                            for unit in selected
+                            if unit.get("section_id")
+                        )
+                    ),
+                    "anchors": list(
+                        dict.fromkeys(
+                            unit.get("anchor")
+                            for unit in selected
+                            if unit.get("anchor")
+                        )
+                    ),
                     "canonical_source_unit_ids": list(
                         dict.fromkeys(unit["canonical_parent_id"] for unit in selected)
                     ),
@@ -553,11 +969,12 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
                     "pl_start": pages[0] if pages else None,
                     "pl_end": pages[-1] if pages else None,
                 },
-                "target_latin": target_latin,
+                "source_text": target_source,
+                "target_latin": target_source,
                 "context_before": context_before,
                 "context_after": context_after,
                 "latin": {
-                    "text": target_latin,
+                    "text": target_source,
                     "start_offset": start,
                     "end_offset": end,
                     "context_before": context_before,
@@ -567,20 +984,58 @@ def make_chunks(parsed: dict[str, Any], chunking: dict[str, Any]) -> list[dict[s
                 "source_spans": target_spans + context_spans,
                 "source_units": selected,
                 "annotations": chunk_annotations,
-                "source_fingerprint": _sha256_text(target_latin),
+                "source_fingerprint": _sha256_text(target_source),
+                "project": parsed.get("project", {}),
+                "task_type": parsed.get("project", {}).get("task_type", "translation"),
+                "source_language": parsed.get("project", {}).get("source_language"),
+                "target_language": parsed.get("project", {}).get("target_language"),
+                "source_label": parsed.get("project", {}).get("source_label"),
+                "target_label": parsed.get("project", {}).get("target_label"),
+                "checks": parsed.get("checks", {}),
             }
         )
         cursor += count
     return chunks
 
 
-def preprocess_book(config: PipelineConfig, book: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def parse_configured_source(config: PipelineConfig, book: int) -> dict[str, Any]:
     source_path = config.source_path(book)
-    parsed = parse_source(
+    if config.source_format == "homily_directory":
+        source = config.section("source")
+        raw_notes_path = source.get("notes_path")
+        notes_path = None
+        if isinstance(raw_notes_path, str) and raw_notes_path.strip():
+            candidate = Path(raw_notes_path)
+            notes_path = candidate if candidate.is_absolute() else config.root / candidate
+        return parse_homily_directory(
+            source_path,
+            book=book,
+            metadata=source.get("metadata", {}),
+            notes_path=notes_path,
+        )
+    parser = parse_homily_source if config.source_format == "homily_markdown" else parse_source
+    return parser(
         source_path.read_text(encoding="utf-8"),
         book=book,
         metadata=config.section("source").get("metadata", {}),
     )
+
+
+def preprocess_book(config: PipelineConfig, book: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    parsed = parse_configured_source(config, book)
+    parsed["project"] = {
+        "id": config.project_id,
+        "title": config.project.get("title") or config.project.get("description"),
+        "task_type": config.task_type,
+        "operation_label": config.operation_label,
+        "source_language": config.source_language,
+        "target_language": config.target_language,
+        "source_label": config.source_label,
+        "target_label": config.target_label,
+        "morphology_enabled": config.stage_enabled("morphology"),
+        "structural_enabled": config.stage_enabled("structural_parse"),
+    }
+    parsed["checks"] = config.section("checks")
     chunks = make_chunks(parsed, config.section("chunking"))
     artifact_dir = config.path_value("artifacts") / f"book{book:02d}"
     artifact_dir.mkdir(parents=True, exist_ok=True)

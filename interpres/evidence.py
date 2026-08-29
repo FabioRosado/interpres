@@ -16,7 +16,7 @@ from glossary import WhitakersWordsBackend, analysis_to_json, tokenize_with_offs
 from .cache import canonical_digest, utc_now
 from .config import PipelineConfig
 from .retrieval import LocalRetrievalIndex, build_local_retrieval_index
-from .source import parse_source, preprocess_book
+from .source import parse_configured_source, preprocess_book
 
 EVIDENCE_SERVICE_VERSION = 3
 CONCORDANCE_VERSION = 2
@@ -51,11 +51,7 @@ def canonical_source_manifest(
     configured = sorted(int(key) for key in config.section("source").get("books", {}))
     selected = books or configured
     parsed = [
-        parse_source(
-            config.source_path(book).read_text(encoding="utf-8"),
-            book=book,
-            metadata=config.section("source").get("metadata", {}),
-        )
+        parse_configured_source(config, book)
         for book in selected
     ]
     return _source_manifest(parsed)
@@ -249,6 +245,7 @@ def build_retrieval_index(config: PipelineConfig) -> dict[str, Any]:
         min_document_frequency=int(
             settings.get("min_document_frequency", 1)
         ),
+        method=str(settings.get("method", "latin_tfidf_lsa_v1")),
         source_identity=expected,
         concordance_identity=concordance.identity,
     )
@@ -769,6 +766,8 @@ class EvidenceService:
         }
 
     def cache_identity(self) -> dict[str, Any]:
+        enabled_kinds = self.config.enabled_evidence_kinds()
+
         def file_identity(path: Path) -> dict[str, Any]:
             if not path.exists():
                 return {"path": str(path), "available": False}
@@ -780,7 +779,13 @@ class EvidenceService:
                 "modified_ns": stat.st_mtime_ns,
             }
 
-        return {
+        def configured_file_identity(key: str) -> dict[str, Any]:
+            try:
+                return file_identity(self.config.path_value(key))
+            except Exception:
+                return {"path_key": key, "available": False, "configured": False}
+
+        identity = {
             "service_version": EVIDENCE_SERVICE_VERSION,
             "lexicon": {
                 "backend": self.lexicon.backend_name,
@@ -793,19 +798,23 @@ class EvidenceService:
                 getattr(
                     self.concordance,
                     "identity",
-                    file_identity(self.config.path_value("concordance")),
+                configured_file_identity("concordance"),
                 )
                 if self.concordance is not None
-                else file_identity(self.config.path_value("concordance"))
+                else configured_file_identity("concordance")
             ),
             "retrieval_index": (
                 {**self.retrieval.identity, "freshness": self.retrieval_freshness}
                 if self.retrieval is not None
-                else file_identity(self.config.path_value("retrieval_index"))
+                else configured_file_identity("retrieval_index")
             ),
-            "vulgate": file_identity(self.config.path_value("vulgate")),
-            "cpdv_path": str(self.config.path_value("cpdv")),
-            "odr": file_identity(self.config.path_value("odr")),
+            "vulgate": configured_file_identity("vulgate"),
+            "cpdv_path": (
+                str(self.config.path_value("cpdv"))
+                if "cpdv" in self.config.data.get("paths", {})
+                else None
+            ),
+            "odr": configured_file_identity("odr"),
             "authorities": {
                 kind: file_identity(authority.path)
                 for kind, authority in sorted(self.authorities.items())
@@ -827,9 +836,17 @@ class EvidenceService:
             },
             "adapter_contracts": self.config.section("research_adapters"),
         }
+        if enabled_kinds is not None:
+            identity["enabled_kinds"] = sorted(enabled_kinds)
+        return identity
 
     @classmethod
     def from_config(cls, config: PipelineConfig, lexicon: WhitakersWordsBackend):
+        enabled_kinds = config.enabled_evidence_kinds()
+
+        def kind_enabled(*kinds: str) -> bool:
+            return enabled_kinds is None or any(kind in enabled_kinds for kind in kinds)
+
         expected_manifest = canonical_source_manifest(config)
         concordance_path = config.path_value("concordance")
         concordance = (
@@ -889,7 +906,7 @@ class EvidenceService:
                 config.path_value("vulgate_books"),
                 config.path_value("cpdv"),
                 config.path_value("odr"),
-            )
+            ) if kind_enabled("scripture") else None
         except (OSError, ValueError):
             scripture = None
         authorities: dict[str, AuthorityIndex] = {}
@@ -898,7 +915,12 @@ class EvidenceService:
             ("proper_name", "proper_name_authority"),
             ("source_edition", "source_edition_authority"),
         ):
-            path = config.path_value(path_key)
+            if not kind_enabled(kind):
+                continue
+            try:
+                path = config.path_value(path_key)
+            except Exception:
+                continue
             if path.exists():
                 try:
                     authorities[kind] = AuthorityIndex(
@@ -926,6 +948,7 @@ class EvidenceService:
     ) -> dict[str, Any]:
         kind = str(request.get("kind", ""))
         query = str(request.get("query", ""))
+        enabled_kinds = self.config.enabled_evidence_kinds()
         evidence_id = "ev-" + canonical_digest({"kind": kind, "query": query, "chunk": chunk and chunk.get("chunk_id")})[:14]
         base = {
             "evidence_id": evidence_id,
@@ -955,6 +978,14 @@ class EvidenceService:
             )
 
         try:
+            if enabled_kinds is not None and kind not in enabled_kinds:
+                return {
+                    **base,
+                    "status": "unavailable",
+                    "evidence_class": "none",
+                    "results": [],
+                    "message": f"Evidence kind disabled by project configuration: {kind}",
+                }
             if kind in {"jerome_phrase", "jerome_lemma"}:
                 if self.concordance is None:
                     return {**base, "status": "unavailable", "evidence_class": "retrieved_evidence", "results": [], "message": "Jerome concordance has not been built"}

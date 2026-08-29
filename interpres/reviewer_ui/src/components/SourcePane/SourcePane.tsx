@@ -16,6 +16,7 @@ interface Props {
 export const SourcePane = ({ view, reviewIndex, selectedTarget, onSelectTarget }: Props) => {
   const panelRef = useRef<HTMLElement>(null);
   const activeUnit = selectedTarget?.sourceUnitIds?.[0] || null;
+  const sourceLabel = view.source.label || 'Latin';
   const finalMapped = new Set(view.final.source_mappings.map((mapping) => String(mapping.source_unit_id || '')));
   const witnessMapped = new Set(view.witnesses.flatMap((witness) => witness.source_mappings.map((mapping) => String(mapping.source_unit_id || ''))));
 
@@ -39,7 +40,7 @@ export const SourcePane = ({ view, reviewIndex, selectedTarget, onSelectTarget }
       <header className="pane-heading">
         <div>
           <p className="eyebrow">Authoritative source</p>
-          <h3 id="source-pane-heading">Latin</h3>
+          <h3 id="source-pane-heading">{sourceLabel}</h3>
         </div>
         <span className="context-badge">{view.source.units.length} PL units</span>
       </header>

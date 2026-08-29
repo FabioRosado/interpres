@@ -77,6 +77,9 @@ export interface SourceUnit {
 export interface SourceView {
   state: string;
   target_latin: string;
+  source_text?: string;
+  label?: string;
+  language?: string;
   context_before: string | null;
   context_after: string | null;
   units: SourceUnit[];
@@ -231,6 +234,7 @@ export interface EditorialState {
 
 export interface ReviewView {
   review_schema_version: string;
+  project?: Record<string, unknown>;
   chunk: ChunkInfo;
   source: SourceView;
   machine: MachineView;

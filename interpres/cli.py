@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,152 @@ def _json(value: Any) -> None:
         except (AttributeError, OSError):
             pass
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+
+
+def _format_duration(milliseconds: Any) -> str:
+    try:
+        value = int(milliseconds)
+    except (TypeError, ValueError):
+        return "?"
+    if value < 1000:
+        return f"{value}ms"
+    seconds = value / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    remaining = int(round(seconds - minutes * 60))
+    if remaining == 60:
+        minutes += 1
+        remaining = 0
+    return f"{minutes}m {remaining:02d}s"
+
+
+def _short_chunk_id(chunk_id: str) -> str:
+    match = re.search(r"-([0-9a-f]{8,16})$", chunk_id)
+    if match:
+        return match.group(1)
+    return chunk_id[:12]
+
+
+def _chunk_label(chunk: dict[str, Any]) -> str:
+    chunk_id = str(chunk.get("chunk_id") or "")
+    candidates = [chunk_id]
+    source = chunk.get("source") if isinstance(chunk.get("source"), dict) else {}
+    candidates.extend(str(item) for item in source.get("source_unit_ids") or [])
+    candidates.extend(str(item) for item in source.get("section_ids") or [])
+    for unit in chunk.get("source_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        for key in ("canonical_parent_id", "source_unit_id"):
+            if unit.get(key):
+                candidates.append(str(unit[key]))
+    for value in candidates:
+        match = re.search(
+            r"homily-(\d+)-section-(\d+)(?:\.p(\d+))?",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            label = f"Homily {int(match.group(1))} section {int(match.group(2))}"
+            if match.group(3):
+                label += f".p{int(match.group(3)):03d}"
+            return label
+    pages = source.get("pages") or []
+    if pages:
+        return "pages " + ",".join(str(page) for page in pages[:3])
+    return chunk_id[:48] if chunk_id else "chunk"
+
+
+def _progress_descriptor(
+    chunk: dict[str, Any],
+    *,
+    selected_index: int,
+    selected_total: int,
+    global_index: int,
+) -> dict[str, Any]:
+    chunk_id = str(chunk.get("chunk_id") or "")
+    return {
+        "selected_index": selected_index,
+        "selected_total": selected_total,
+        "global_index": global_index,
+        "label": _chunk_label(chunk),
+        "short_id": _short_chunk_id(chunk_id),
+    }
+
+
+def _progress_prefix(descriptor: dict[str, Any] | None) -> str:
+    if not descriptor:
+        return "[chunk ?]"
+    return (
+        f"[{descriptor['selected_index']}/{descriptor['selected_total']} | "
+        f"chunk {descriptor['global_index']}] "
+        f"{descriptor['label']} ({descriptor['short_id']})"
+    )
+
+
+def _progress_descriptors(
+    chunks: list[dict[str, Any]],
+    all_chunks: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    global_indices = {
+        chunk["chunk_id"]: index
+        for index, chunk in enumerate(all_chunks, 1)
+    }
+    return {
+        chunk["chunk_id"]: _progress_descriptor(
+            chunk,
+            selected_index=index,
+            selected_total=len(chunks),
+            global_index=global_indices.get(chunk["chunk_id"], index),
+        )
+        for index, chunk in enumerate(chunks, 1)
+    }
+
+
+def _print_progress_event(
+    event: dict[str, Any],
+    descriptors: dict[str, dict[str, Any]],
+    *,
+    resume_failed_stages: dict[str, str] | None = None,
+) -> None:
+    ev = event.get("event")
+    chunk_id = str(event.get("chunk_id") or "")
+    descriptor = descriptors.get(chunk_id)
+    if ev == "chunk_start":
+        failed_stage = (resume_failed_stages or {}).get(chunk_id)
+        verb = "resuming" if failed_stage else "starting"
+        failed_text = f" failed_stage={failed_stage}" if failed_stage else ""
+        print(
+            f"\n{_progress_prefix(descriptor)} {verb}{failed_text} through={event.get('through')} profile={event.get('profile')}",
+            flush=True,
+        )
+    elif ev == "stage_start":
+        stage = event.get("stage")
+        model = event.get("model") or {}
+        provider = model.get("provider", "local")
+        model_name = model.get("model")
+        model_label = provider if not model_name else f"{provider}/{model_name}"
+        print(f"  -> {stage} [{model_label}]", flush=True)
+    elif ev == "stage_complete":
+        stage = event.get("stage")
+        status = event.get("status")
+        cached = event.get("cached")
+        duration = event.get("duration_ms")
+        tag = "cached" if cached else _format_duration(duration)
+        print(f"  <- {stage} [{status}] ({tag})", flush=True)
+    elif ev == "chunk_complete":
+        completed = event.get("completed_stages", [])
+        status = event.get("status")
+        if status == "incomplete":
+            print(
+                f"{_progress_prefix(descriptor)} stopped at {event.get('failed_stage')} after {len(completed)} completed stages",
+                flush=True,
+            )
+        else:
+            print(
+                f"{_progress_prefix(descriptor)} finished status={status} completed_stages={len(completed)}",
+                flush=True,
+            )
 
 
 def _select_chunks(chunks: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -167,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     concordance.add_argument("--no-lemmas", action="store_true")
     retrieval = sub.add_parser(
         "build-retrieval-index",
-        help="Build persisted inspectable local Latin retrieval vectors",
+        help="Build persisted inspectable local retrieval vectors",
     )
     retrieval.add_argument("project", nargs="?", default=None)
     search_corpus = sub.add_parser(
@@ -395,10 +542,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.full:
             _json(chunks)
         else:
-            _json([{"index": all_chunks.index(chunk) + 1, "chunk_id": chunk["chunk_id"], "source_unit_ids": chunk["source"]["source_unit_ids"], "pages": chunk["source"]["pages"], "target_chars": len(chunk["target_latin"]), "context_before_chars": len(chunk["context_before"]), "context_after_chars": len(chunk["context_after"]), "annotations": len(chunk["annotations"]), "preview": chunk["target_latin"][:180]} for chunk in chunks])
+            _json([{"index": all_chunks.index(chunk) + 1, "chunk_id": chunk["chunk_id"], "source_unit_ids": chunk["source"]["source_unit_ids"], "pages": chunk["source"]["pages"], "target_chars": len(chunk["target_latin"]), "source_chars": len(chunk.get("source_text") or chunk["target_latin"]), "context_before_chars": len(chunk["context_before"]), "context_after_chars": len(chunk["context_after"]), "annotations": len(chunk["annotations"]), "preview": (chunk.get("source_text") or chunk["target_latin"])[:180]} for chunk in chunks])
         return 0
     if args.command == "build-concordance":
-        _json(build_concordance(config, books=args.books, include_lemmas=not args.no_lemmas))
+        enabled = config.enabled_evidence_kinds()
+        lemma_default = enabled is None or bool({"jerome_lemma", "morphology", "glossary"} & enabled)
+        _json(build_concordance(config, books=args.books, include_lemmas=(not args.no_lemmas and lemma_default)))
         return 0
     if args.command == "build-retrieval-index":
         _json(build_retrieval_index(config))
@@ -435,33 +584,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 raise
 
-        chunks = _select_chunks(load_chunks(config, args.book), args)
+        all_chunks = load_chunks(config, args.book)
+        chunks = _select_chunks(all_chunks, args)
+        progress_descriptors = _progress_descriptors(chunks, all_chunks)
         
         def progress_handler(event: dict[str, Any]) -> None:
-            ev = event.get("event")
-            if ev == "chunk_start":
-                print(
-                    f"\n[{event.get('chunk_id')}] starting through={event.get('through')} profile={event.get('profile')}",
-                    flush=True,
-                )
-            elif ev == "stage_start":
-                stage = event.get("stage")
-                model = event.get("model") or {}
-                provider = model.get("provider", "local")
-                model_name = model.get("model", "?")
-                print(f"  -> {stage} [{provider}/{model_name}]", flush=True)
-            elif ev == "stage_complete":
-                stage = event.get("stage")
-                status = event.get("status")
-                cached = event.get("cached")
-                duration = event.get("duration_ms")
-                tag = "cached" if cached else f"{duration}ms"
-                print(f"  <- {stage} [{status}] ({tag})", flush=True)
-            elif ev == "chunk_complete":
-                print(
-                    f"[{event.get('chunk_id')}] finished status={event.get('status')} stages={','.join(event.get('completed_stages', []))}",
-                    flush=True,
-                )
+            _print_progress_event(event, progress_descriptors)
         
         pipeline = EvidenceFirstPipeline(
             config,
@@ -514,19 +642,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run or not jobs:
             _json(jobs)
             return 0
+        all_chunks = load_chunks(config, args.book)
         chunks_by_id = {
-            chunk["chunk_id"]: chunk for chunk in load_chunks(config, args.book)
+            chunk["chunk_id"]: chunk for chunk in all_chunks
         }
-        pipeline = EvidenceFirstPipeline(config, model_profile=args.profile)
-        overall = []
-        for index, job in enumerate(jobs, 1):
-            chunk = chunks_by_id[job["chunk_id"]]
-            print(
-                f"[{index}/{len(jobs)}] {chunk['chunk_id']} "
-                f"failed_stage={job['failed_stage']} through={args.through} "
-                f"profile={args.profile}",
-                flush=True,
+        chunks = [chunks_by_id[job["chunk_id"]] for job in jobs]
+        progress_descriptors = _progress_descriptors(chunks, all_chunks)
+        failed_stage_by_chunk = {
+            job["chunk_id"]: job["failed_stage"] for job in jobs
+        }
+
+        def progress_handler(event: dict[str, Any]) -> None:
+            _print_progress_event(
+                event,
+                progress_descriptors,
+                resume_failed_stages=failed_stage_by_chunk,
             )
+
+        pipeline = EvidenceFirstPipeline(
+            config,
+            model_profile=args.profile,
+            progress_callback=progress_handler,
+        )
+        overall = []
+        for job in jobs:
+            chunk = chunks_by_id[job["chunk_id"]]
             result = pipeline.run_chunk(
                 chunk,
                 through=args.through,

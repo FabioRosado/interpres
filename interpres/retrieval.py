@@ -12,6 +12,8 @@ from .cache import canonical_digest, utc_now
 
 INDEX_VERSION = 1
 INDEX_METHOD = "latin_tfidf_lsa_v1"
+SOURCE_INDEX_METHOD = "source_tfidf_lsa_v1"
+SUPPORTED_INDEX_METHODS = {INDEX_METHOD, SOURCE_INDEX_METHOD}
 
 
 def _normalize_latin(value: str) -> str:
@@ -22,8 +24,19 @@ def _normalize_latin(value: str) -> str:
     return " ".join(re.findall(r"[a-z]+", value))
 
 
-def _features(value: str) -> list[str]:
-    tokens = _normalize_latin(value).split()
+def _normalize_source(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value.casefold())
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return " ".join(re.findall(r"[a-z0-9]+", value))
+
+
+def _features(value: str, *, method: str = INDEX_METHOD) -> list[str]:
+    if method == INDEX_METHOD:
+        tokens = _normalize_latin(value).split()
+    elif method == SOURCE_INDEX_METHOD:
+        tokens = _normalize_source(value).split()
+    else:
+        raise ValueError(f"Unsupported retrieval index method: {method}")
     unigrams = [f"w:{token}" for token in tokens]
     bigrams = [f"b:{left}_{right}" for left, right in zip(tokens, tokens[1:])]
     return unigrams + bigrams
@@ -48,6 +61,7 @@ def build_local_retrieval_index(
     *,
     dimensions: int = 48,
     min_document_frequency: int = 1,
+    method: str = INDEX_METHOD,
     source_identity: dict[str, Any] | None = None,
     concordance_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -62,10 +76,14 @@ def build_local_retrieval_index(
     except ImportError as exc:  # pragma: no cover - environment contract
         raise RuntimeError("NumPy is required to build the local retrieval index") from exc
 
+    if method not in SUPPORTED_INDEX_METHODS:
+        raise ValueError(f"Unsupported retrieval index method: {method}")
     records = _read_jsonl(concordance_path)
     if not records:
         raise ValueError("Cannot build retrieval index from an empty concordance")
-    feature_lists = [_features(str(record.get("text", ""))) for record in records]
+    feature_lists = [
+        _features(str(record.get("text", "")), method=method) for record in records
+    ]
     document_frequency: Counter[str] = Counter()
     for features in feature_lists:
         document_frequency.update(set(features))
@@ -118,7 +136,7 @@ def build_local_retrieval_index(
 
     payload: dict[str, Any] = {
         "index_version": INDEX_VERSION,
-        "method": INDEX_METHOD,
+        "method": method,
         "built_at": utc_now(),
         "source": {
             "concordance_path": str(concordance_path),
@@ -132,7 +150,11 @@ def build_local_retrieval_index(
             ),
         },
         "parameters": {
-            "features": "normalized Latin word unigrams+bigrams",
+            "features": (
+                "normalized Latin word unigrams+bigrams"
+                if method == INDEX_METHOD
+                else "normalized source word/number unigrams+bigrams"
+            ),
             "tf": "1+log(count)",
             "idf": "log((N+1)/(df+1))+1",
             "normalization": "l2 before and after LSA",
@@ -179,7 +201,7 @@ def build_local_retrieval_index(
     temporary.replace(output_path)
     return {
         "path": str(output_path),
-        "method": INDEX_METHOD,
+        "method": method,
         "records": document_count,
         "vocabulary": len(vocabulary),
         "dimensions": rank,
@@ -195,7 +217,7 @@ class LocalRetrievalIndex:
     def __init__(self, path: Path):
         self.path = path
         value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict) or value.get("method") != INDEX_METHOD:
+        if not isinstance(value, dict) or value.get("method") not in SUPPORTED_INDEX_METHODS:
             raise ValueError(f"Unsupported retrieval index: {path}")
         self.value = value
         self.vocabulary = {
@@ -221,7 +243,8 @@ class LocalRetrievalIndex:
             import numpy as np
         except ImportError as exc:  # pragma: no cover - environment contract
             raise RuntimeError("NumPy is required for local retrieval") from exc
-        counts = Counter(_features(query))
+        method = str(self.value.get("method", INDEX_METHOD))
+        counts = Counter(_features(query, method=method))
         vector = np.zeros(len(self.vocabulary), dtype=np.float64)
         idf = self.value["idf"]
         for feature, count in counts.items():
@@ -262,7 +285,7 @@ class LocalRetrievalIndex:
                 "score": round(score, 8),
                 "lexical_score": round(lexical_score, 8),
                 "latent_score": round(latent_score, 8),
-                "match_kind": INDEX_METHOD,
+                "match_kind": method,
                 "text": document["text"],
                 "provenance": document["provenance"],
                 "source_unit_id": document["source_unit_id"],

@@ -14,6 +14,7 @@ from .config import PipelineConfig
 from .pipeline import EvidenceFirstPipeline
 from .providers import ModelProvider, ProviderCallError, ProviderResponse
 from .schemas import parse_json_response
+from .tasks import TaskProfile
 
 CHALLENGE_ERROR_TYPES = {
     "negation",
@@ -26,6 +27,16 @@ CHALLENGE_ERROR_TYPES = {
     "unsupported_certainty",
     "scripture",
     "proper_name",
+    "meaning_shift",
+    "paraphrase",
+    "preposition",
+    "theological_term",
+    "archaic_residue",
+    "archaic_introduction",
+    "reverse_modernization",
+    "over_modernization",
+    "rhetorical_structure",
+    "quotation",
     "other",
 }
 
@@ -87,9 +98,11 @@ def load_challenges(path: Path) -> list[dict[str, Any]]:
             case = json.loads(line)
             if not isinstance(case, dict):
                 raise ValueError(f"Challenge {path}:{line_number} must be an object")
-            for field in ("case_id", "latin", "candidate_english", "expected_error_types", "clean"):
+            for field in ("case_id", "candidate_english", "expected_error_types", "clean"):
                 if field not in case:
                     raise ValueError(f"Challenge {path}:{line_number} missing {field}")
+            if "latin" not in case and "source_text" not in case:
+                raise ValueError(f"Challenge {path}:{line_number} missing source_text")
             cases.append(case)
     return cases
 
@@ -130,19 +143,20 @@ def apply_mutation(english: str, mutation: str, args: dict[str, Any] | None = No
 
 def _review_prompt(case: dict[str, Any], lexical: list[dict[str, Any]], checks: dict[str, Any]) -> str:
     # Deliberately omit mutation/clean/expected labels from the reviewing model.
-    return f"""Adversarially review one proposed English translation against its Latin.
+    source_text = case.get("source_text") or case["latin"]
+    return f"""Adversarially review one proposed English rendering against its authoritative source.
 The candidate may be clean or may contain subtle errors; you are not told
 which. Do not manufacture findings. Agreement with your memory is not proof.
-Use visible Latin and supplied deterministic signals only. External claims,
+Use visible source text and supplied deterministic signals only. External claims,
 including Scripture identifications, must be flagged as unverified rather than
 asserted from memory.
 
 Return VALID JSON ONLY:
-{{"status":"no_issue_found|issue_found|unresolved","findings":[{{"latin":"exact substring","english":"candidate wording","type":"negation|subject_object|number|lexical|attachment|omission|addition|unsupported_certainty|scripture|proper_name|other","severity":"low|medium|high","reason":"grounded visible reason"}}]}}
+{{"status":"no_issue_found|issue_found|unresolved","findings":[{{"latin":"exact source substring","english":"candidate wording","type":"negation|subject_object|number|lexical|attachment|omission|addition|unsupported_certainty|scripture|proper_name|meaning_shift|paraphrase|preposition|theological_term|archaic_residue|archaic_introduction|reverse_modernization|over_modernization|rhetorical_structure|quotation|other","severity":"low|medium|high","reason":"grounded visible reason"}}]}}
 
-LATIN:
+SOURCE:
 <<<
-{case['latin']}
+{source_text}
 
 CANDIDATE ENGLISH:
 <<<
@@ -177,6 +191,12 @@ def _deterministic_detections(checks: dict[str, Any], lexical: list[dict[str, An
         "negation": "negation",
         "proper_names": "proper_name",
         "coverage_signal": "omission",
+        "scripture_reference": "scripture",
+        "quoted_material": "quotation",
+        "archaic_residue": "archaic_residue",
+        "theological_terms": "theological_term",
+        "omission_signal": "omission",
+        "historical_lexical_trap": "lexical",
     }
     detected = {
         mapping[item["check"]]
@@ -192,11 +212,12 @@ def _challenge_chunk(case: dict[str, Any]) -> dict[str, Any]:
     source = case.get("source") or {}
     page = str(source.get("page", "challenge"))
     source_unit_id = f"challenge-{case['case_id']}"
-    latin = case["latin"]
+    source_text = case.get("source_text") or case["latin"]
+    project = case.get("project") if isinstance(case.get("project"), dict) else {}
     fingerprint = canonical_digest(
         {
             "case_id": case["case_id"],
-            "latin": latin,
+            "source_text": source_text,
             "candidate_english": case["candidate_english"],
         }
     )
@@ -204,23 +225,38 @@ def _challenge_chunk(case: dict[str, Any]) -> dict[str, Any]:
         "chunk_id": f"challenge-{case['case_id']}",
         "id": f"challenge-{case['case_id']}",
         "book": source.get("book"),
-        "target_latin": latin,
+        "target_latin": source_text,
+        "source_text": source_text,
         "context_before": "",
         "context_after": "",
         "source_fingerprint": fingerprint,
+        "task_type": project.get("task_type", "translation"),
+        "project": project,
+        "checks": case.get("checks", {}),
         "source": {
             "kind": source.get("kind", "challenge_case"),
             "pages": [page],
             "source_unit_ids": [source_unit_id],
+            "task_type": project.get("task_type", "translation"),
         },
-        "source_units": [source_unit_id],
+        "source_units": [
+            {
+                "source_unit_id": source_unit_id,
+                "canonical_parent_id": source_unit_id,
+                "book": source.get("book"),
+                "page": page,
+                "clean_start": 0,
+                "clean_end": len(source_text),
+                "text": source_text,
+            }
+        ],
         "source_spans": [
             {
                 "role": "target",
                 "source_unit_id": source_unit_id,
                 "page": page,
                 "clean_start": 0,
-                "clean_end": len(latin),
+                "clean_end": len(source_text),
             }
         ],
         "page_markers": [{"page": page, "raw": f"[page {page}]"}],
@@ -276,12 +312,29 @@ def run_challenges(
         raise ValueError("deterministic_only and full_pipeline are mutually exclusive")
     backend = lexicon or WhitakersWordsBackend()
     model_provider = provider or ModelProvider(config)
+    task = TaskProfile.from_config(config)
     cases = load_challenges(config.path_value("challenge_set"))
     results = []
     for case in cases:
-        lexical = flags_to_json(analyze_chunk(case["latin"], backend))
+        source_text = case.get("source_text") or case["latin"]
+        case.setdefault(
+            "project",
+            {
+                "id": task.project_id,
+                "task_type": task.task_type,
+                "source_language": task.source_language,
+                "target_language": task.target_language,
+                "source_label": task.source_label,
+                "target_label": task.target_label,
+            },
+        )
+        lexical = [] if not task.morphology_enabled else flags_to_json(analyze_chunk(source_text, backend))
         chunk = {
-            "target_latin": case["latin"],
+            "target_latin": source_text,
+            "source_text": source_text,
+            "task_type": task.task_type,
+            "project": case["project"],
+            "checks": case.get("checks", config.section("checks")),
             "source_spans": [],
             "page_markers": [],
             "source": {"pages": []},

@@ -1,0 +1,237 @@
+project:
+  id: chrysostom-homilies
+  name: chrysostom-homilies
+  title: "Chrysostom Homily Modernization"
+  task_type: "modernization"
+  operation_label: "modernization"
+  source_language: "historical_english"
+  target_language: "modern_english"
+  source_format: "homily_directory"
+  labels:
+    source: "Historical English"
+    target: "Modern English"
+
+pipeline:
+  version: "5.1.0-evidence-first-multitask"
+  schema_version: 1
+  prompt_version: "2026-08-28.5"
+
+source:
+  format: "homily_directory"
+  books:
+    "1": "../../chrysostom_output/clean"
+  notes_path: "../../chrysostom_output/notes"
+  metadata:
+    author: "John Chrysostom"
+    work: "Homilies on the Gospel of St. Matthew"
+    corpus: "Nicene and Post-Nicene Fathers, First Series, Volume 10"
+    source_edition: "Public-domain NPNF PDF extracted locally"
+
+paths:
+  artifacts: "artifacts"
+  cache: ".cache"
+  concordance: "artifacts/concordance.jsonl"
+  retrieval_index: "artifacts/retrieval-index.json"
+  editorial_decisions: "editorial/decisions.jsonl"
+  human_reviews: "editorial/human_reviews.jsonl"
+  editorial_reviews: "editorial/reviews"
+  challenge_set: "challenges/challenge_set.jsonl"
+  challenge_results: "artifacts/challenge-results.jsonl"
+
+chunking:
+  target_source_units: 1
+  min_source_units: 1
+  max_source_units: 1
+  max_chars: 2200
+  context_units: 1
+  context_max_chars: 900
+
+stages:
+  morphology:
+    enabled: false
+  structural_parse:
+    enabled: false
+
+providers:
+  ollama:
+    base_url: "http://127.0.0.1:11434/api/chat"
+    timeout_seconds: 1800
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1/chat/completions"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout_seconds: 1800
+
+models:
+  witness_a:
+    provider: ollama
+    model: "qwen3.5:9b"
+    temperature: 0.1
+    context: 8192
+    max_output_tokens: 1400
+    thinking: false
+    retries: 1
+  witness_b:
+    provider: ollama
+    model: "mistral-small3.2:24b"
+    temperature: 0.1
+    context: 8192
+    max_output_tokens: 1400
+    thinking: false
+    retries: 1
+  structural_parser:
+    provider: ollama
+    model: "qwen3.5:9b"
+    temperature: 0.0
+    context: 8192
+    max_output_tokens: 600
+    thinking: false
+    retries: 0
+  prosecutor:
+    provider: ollama
+    model: "qwen3.5:9b"
+    temperature: 0.0
+    context: 32768
+    max_output_tokens: 3600
+    thinking: false
+    retries: 0
+  adjudicator:
+    provider: ollama
+    model: "qwen3.5:9b"
+    temperature: 0.0
+    context: 32768
+    max_output_tokens: 3200
+    thinking: false
+    retries: 0
+  experimental_translategemma:
+    enabled: false
+    provider: ollama
+    model: "translategemma:27b"
+    temperature: 0.1
+    context: 16384
+    max_output_tokens: 1800
+    thinking: false
+    retries: 1
+
+profiles:
+  production:
+    description: "Configured modernization roles; default for real outcomes."
+    models: {}
+  smoke:
+    description: "Fast plumbing/schema checks only; never use results as publication outcomes."
+    models: {}
+
+evidence:
+  prosecutor_research_rounds: 0
+  adjudicator_research_rounds: 0
+  max_requests_per_round: 4
+  max_results_per_request: 6
+  snippet_chars: 700
+  morphology_prompt_forms: 0
+  semantic_search_enabled: true
+  external_web_enabled: false
+  enabled_kinds:
+    - semantic_rag
+    - corpus_related
+    - source_edition
+
+checks:
+  archaic_residue_terms:
+    - thou
+    - thee
+    - thy
+    - thine
+    - hath
+    - doth
+    - saith
+    - mayest
+    - hast
+    - wherein
+    - unto
+    - shew
+    - amongst
+    - touching
+    - art
+    - dost
+    - shalt
+    - wilt
+    - ye
+  reverse_modernization_pairs:
+    - modern: says
+      archaic: saith
+    - modern: has
+      archaic: hath
+    - modern: have
+      archaic: hast
+    - modern: does
+      archaic: doth
+    - modern: show
+      archaic: shew
+    - modern: to
+      archaic: unto
+    - modern: you
+      archaic: thou
+    - modern: you
+      archaic: thee
+    - modern: your
+      archaic: thy
+    - modern: your
+      archaic: thine
+  unnecessary_modernization_pairs:
+    - source: arisen
+      target: had birth
+      note: "Already-modern arisen should not be replaced with a less natural phrase."
+    - source: separated
+      target: parted off
+      note: "Already-modern separated should not be replaced merely for variation."
+  preserved_terms:
+    - grace
+    - repentance
+    - mercy
+    - judgment
+    - resurrection
+    - incarnation
+    - Scripture
+    - Church
+  lexical_traps:
+    prevent:
+      wrong_modern_senses:
+        - stop
+      note: "In older theological prose, prevent may mean go before or anticipate."
+    conversation:
+      wrong_modern_senses:
+        - discussion
+      note: "Historical religious prose may use conversation for conduct or manner of life."
+
+structural_output_budget:
+  large_sentence_threshold: 12
+  large_max_output_tokens: 1200
+
+prosecutor_input_budget:
+  max_prompt_utf8_bytes: 30000
+  max_request_utf8_bytes: 32000
+  max_estimated_prompt_tokens: 10000
+  estimator_bytes_per_token: 3.0
+
+adjudicator_input_budget:
+  max_prompt_utf8_bytes: 36000
+  max_request_utf8_bytes: 40000
+  max_estimated_prompt_tokens: 12000
+  estimator_bytes_per_token: 3.0
+
+adjudicator_edit_budget:
+  max_words_per_edit: 36
+  max_cumulative_words: 72
+  max_base_replacement_ratio: 0.25
+
+retrieval:
+  method: "source_tfidf_lsa_v1"
+  dimensions: 32
+  min_document_frequency: 1
+
+research_adapters:
+  authority_schema: "source-authority-jsonl/v1"
+
+execution:
+  retry_failed_by_default: false
+  save_raw_responses: true
+  deterministic_temperature: 0.0

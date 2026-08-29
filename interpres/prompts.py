@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .source import split_sentences
+from .tasks import TaskProfile, task_profile_from_chunk
 
 ADJUDICATOR_INPUT_BUDGET_POLICY_VERSION = 2
 PROSECUTOR_INPUT_BUDGET_POLICY_VERSION = 1
@@ -255,6 +256,10 @@ def _compact_deterministic_issues(checks: dict[str, Any]) -> dict[str, Any]:
                 "source_unit_ids",
                 "textual_match_verified",
                 "source_annotation_verified",
+                "terms",
+                "pairs",
+                "configured_pairs",
+                "mechanically_proven",
             )
             if key in evidence
         }
@@ -552,32 +557,8 @@ morphology. Do not translate and make no external attributions.
 """
 
 
-def witness_prompt(chunk: dict[str, Any]) -> str:
-    return f"""Translate the TARGET Latin passage from St Jerome into accurate English.
-
-Priorities:
-- Preserve every clause and meaningful distinction.
-- Stay relatively close to the Latin syntax where readable.
-- Do not add historical or theological explanations.
-- Do not silently omit difficult wording.
-- Preserve technical, biblical, Hebrew, Greek, and textual-critical terms.
-- Do not modernize an unfamiliar ancient term because it resembles a modern word.
-- Preserve names, negation, number, chronology, and textual variants carefully.
-- If genuinely uncertain, mark `[UNCERTAIN: precise explanation]`.
-- Do not reconstruct quotations or references from memory.
-- No auxiliary Latin context is supplied. Translate all and only the target.
-- Return only the continuous English translation. Do not return JSON, headings,
-  commentary, introductions, notes, source-unit markers, or Markdown fences.
-- Preserve an incomplete opening or terminal fragment as an incomplete English
-  fragment. Do not complete a quotation or sentence from memory.
-
-<TARGET_LATIN translate="all_and_only">
-{chunk['target_latin']}
-</TARGET_LATIN>
-
-The target above is the complete request. Do not infer or continue text beyond
-its beginning or end, even when a quotation or sentence fragment is incomplete.
-"""
+def witness_prompt(chunk: dict[str, Any], task: TaskProfile | None = None) -> str:
+    return (task or task_profile_from_chunk(chunk)).witness_prompt(chunk)
 
 
 def _quorum_filtered_checks(
@@ -656,6 +637,63 @@ DETERMINISTIC DEGRADED WITNESS QUORUM:
 """
 
 
+def _modernization_prosecutor_notice(task: TaskProfile) -> str:
+    if not task.is_modernization:
+        return ""
+    return """
+MODERNIZATION REVIEW CONTRACT:
+- This is conservative modernization, not a rewrite or style polish.
+- A witness may be correct when it leaves already-clear modern wording unchanged.
+- Ask whether each changed phrase had a genuine modernization need.
+- Flag unnecessary rewriting, synonym churn, paraphrase, omission, meaning shift,
+  theological weakening, Scripture alteration, lost negation, and lost rhetorical
+  structure.
+- Quotation marks alone do not make historical English immutable. Ask whether
+  archaic wording survived merely because it appeared inside ordinary quotation
+  marks.
+- Distinguish explicitly protected/verbatim spans from ordinary quoted
+  historical-English text. Scripture reference identity should be preserved,
+  but the historical-English wording of an ordinary quotation may still need
+  conservative modernization.
+- Treat introduced archaism as a task-direction error: says -> saith,
+  has -> hath, have -> hast, show -> shew, to -> unto, or you -> thou outside
+  explicitly protected spans is wrong-direction modernization.
+- Do not punish genuinely useful modernization of archaic forms such as saith
+  -> says, hath -> has, doth -> does, shew -> show, or unto -> to.
+- Challenge questions: Did the witness change already-modern wording without a
+  clear need? Did it introduce older English absent from the source? Did it pick
+  a less modern synonym? Did it paraphrase rather than modernize? Could the
+  source wording have safely remained unchanged?
+"""
+
+
+def _modernization_adjudicator_notice(task: TaskProfile) -> str:
+    if not task.is_modernization:
+        return ""
+    return """
+MODERNIZATION DECISION CONTRACT:
+- Conservative modernization means edit only what a modern reader genuinely
+  needs modernized.
+- Prefer the smallest change necessary; unchanged source wording is often the
+  best final wording.
+- When valid witnesses are semantically equivalent, prefer the one with fewer
+  unnecessary changes from the source.
+- Do not use edit distance, changed-word count, or rewrite percentage as a
+  positive quality signal.
+- Do not prefer more archaic, more literary, more elaborate, or more extensively
+  rewritten prose.
+- Fix only concrete review problems. If a proposed edit is merely stylistic,
+  omit it.
+- Quotation marks alone do not make historical English immutable. If one valid
+  witness modernizes thou mayest -> you may, thou hast -> you have, or saith he
+  -> he says inside an ordinary quotation, prefer that over a witness that keeps
+  the archaism, unless the span is explicitly protected/verbatim.
+- Never move backward into older English outside explicitly protected spans:
+  says -> saith, has -> hath, have -> hast, show -> shew, to -> unto, or you ->
+  thou is a task-direction error.
+"""
+
+
 def prosecutor_prompt(
     chunk: dict[str, Any],
     structural: dict[str, Any],
@@ -666,40 +704,42 @@ def prosecutor_prompt(
     *,
     max_evidence_requests: int = 6,
     witness_gate: dict[str, Any] | None = None,
+    task: TaskProfile | None = None,
 ) -> str:
+    task = task or task_profile_from_chunk(chunk)
+    brief = task.prosecutor_brief()
+    challenge_limit = task.prosecutor_challenge_limit(budgeted=False)
     witness_a_section, witness_b_section = _quorum_witness_sections(
         witness_a, witness_b, witness_gate, prosecutor=True
     )
     visible_checks = _quorum_filtered_checks(checks, witness_gate)
-    return f"""You are the adversarial prosecutor for an evidence-first English edition
-of St Jerome's Commentary on Ezekiel. Run a serious review on this chunk even
+    return f"""{brief['role']} Run a serious review on this chunk even
 when the witnesses agree.
 
 Your job is not to retranslate or manufacture disagreement. Try to construct a
-grounded reason a proposed translation may be wrong, incomplete, internally
+grounded reason a proposed {task.final_noun} may be wrong, incomplete, internally
 incoherent, overconfident, or dependent on unverified evidence. Agreement is
 not proof. A failure to find an issue is not proof.
 
-Use only visible Latin/context, the original blind structural parse,
-deterministic lexical evidence, and deterministic checks as current evidence.
+Use only the visible authoritative source/context, the original blind structural
+parse when available, deterministic lexical evidence, and deterministic checks
+as current evidence.
 Human-approved editorial precedents in the checks are project consistency
 guidance, not lexical, manuscript, or corpus proof. Test them against the
-visible Latin and request source evidence when their interpretation matters.
-Pretrained memories of Scripture, Jerome usage, lexicons, chronology, names,
+visible source and request source evidence when their interpretation matters.
+Pretrained memories of Scripture, author usage, lexicons, chronology, names,
 or history are hypotheses only. Request precise evidence whenever such a claim
-matters. Inspect especially omissions/additions, subject-object reversal,
-negation, numbers, lexical sense, attachment, referents, names, Scripture,
-textual issues, excessive certainty, and contradictions with later information
-visible in the same target passage.
+matters. Inspect especially: {brief['focus']}
 {_quorum_notice(witness_gate)}
+{_modernization_prosecutor_notice(task)}
 
 Return VALID JSON ONLY:
 {{
   "status": "no_issue_found|insufficient_basis_to_challenge|requires_evidence|grounded_challenge|unresolved",
   "summary": "one precise sentence",
   "challenges": [{{
-    "latin": "exact short target substring",
-    "type": "negation|subject_object|number|lexical|attachment|omission|addition|unsupported_certainty|scripture|proper_name|idiom|hebrew_greek|textual|chronology|morphology|source_text|internal_consistency|other",
+    "latin": "exact short source substring",
+    "type": "{brief['challenge_types']}",
     "severity": "low|medium|high",
     "witness_target": "witness_a|witness_b|both|final_question",
     "claim": "precise allegation",
@@ -707,24 +747,26 @@ Return VALID JSON ONLY:
     "requires_external_evidence": true
   }}],
   "evidence_requests": [{{
-    "kind": "jerome_phrase|jerome_lemma|scripture|glossary|morphology|semantic_rag|corpus_related|source_edition|chronology|proper_name|web_research",
+    "kind": "{brief['evidence_kinds']}",
     "query": "specific retrievable query",
     "reason": "which challenge it tests and how"
   }}]
 }}
 
 OUTPUT BUDGET RULES:
-- Return at most 15 distinct substantive challenges. Consolidate overlapping
+- Return at most {challenge_limit} distinct substantive challenges. Consolidate overlapping
   lexical, morphology, and attachment allegations instead of repeating them.
 - Return at most {max(0, max_evidence_requests)} evidence requests, ordered by
   which could most materially change the decision. Software cannot execute
   requests beyond this bound.
 - Keep `summary`, `claim`, `visible_basis`, `query`, and `reason` concise.
+- Do not include scratchpad reasoning, self-correction, or phrases such as
+  "wait", "let me re-read", or "actually" in any JSON string.
 - Emit minified JSON on one line without indentation or display whitespace.
 
-TARGET LATIN:
+{brief['source_heading']}:
 <<<
-{chunk['target_latin']}
+{task.source_text(chunk)}
 
 READ-ONLY CONTEXT BEFORE / AFTER:
 <<<
@@ -736,11 +778,11 @@ READ-ONLY CONTEXT BEFORE / AFTER:
 
 {witness_b_section}
 
-BLIND STRUCTURAL PARSE (immutable original):
+{brief['structure_label']}:
 <<<
 {_compact_json(structural)}
 
-COMPACT LEXICAL FLAGS (full deterministic morphology is stored separately):
+{brief['lexical_label']}:
 <<<
 {_compact_json(lexical.get('flags', []))}
 
@@ -795,6 +837,10 @@ def _prosecutor_finding(finding: dict[str, Any]) -> dict[str, Any]:
                 "missing",
                 "reference",
                 "source_unit_ids",
+                "terms",
+                "pairs",
+                "configured_pairs",
+                "mechanically_proven",
             )
             if key in evidence
         },
@@ -898,39 +944,40 @@ def _render_budgeted_prosecutor(
     max_evidence_requests: int,
     witness_gate: dict[str, Any] | None,
     notice: str,
+    task: TaskProfile | None = None,
 ) -> str:
+    task = task or task_profile_from_chunk(chunk)
+    brief = task.prosecutor_brief()
+    challenge_limit = task.prosecutor_challenge_limit(budgeted=True)
     witness_a_section, witness_b_section = _quorum_witness_sections(
         witness_a, witness_b, witness_gate, prosecutor=True
     )
-    return f"""You are the adversarial prosecutor for an evidence-first English edition
-of St Jerome's Commentary on Ezekiel. Challenge omissions, additions,
-subject-object reversal, negation, numbers, lexical sense, attachment,
-referents, names, Scripture, textual issues, and unsupported certainty.
+    return f"""{brief['role']} {brief['focus']}
 Agreement and fluency are not proof. Do not retranslate, manufacture a second
 witness, or treat pretrained memory as evidence. Request precise evidence when
 an external claim matters.
 {_quorum_notice(witness_gate)}
+{_modernization_prosecutor_notice(task)}
 
 Return minified VALID JSON with exactly: status
 (no_issue_found|insufficient_basis_to_challenge|requires_evidence|
 grounded_challenge|unresolved), summary, challenges, and evidence_requests.
-Each challenge has latin (an exact short target substring), type, severity,
+Each challenge has latin (an exact short authoritative-source substring), type, severity,
 witness_target, claim, visible_basis, and requires_external_evidence. Return at
-most 12 distinct challenges and at most {max(0, max_evidence_requests)} evidence
+most {challenge_limit} distinct challenges and at most {max(0, max_evidence_requests)} evidence
 requests, each with kind, query, and reason.
-Allowed challenge types: negation|subject_object|number|lexical|attachment|
-omission|addition|unsupported_certainty|scripture|proper_name|idiom|
-hebrew_greek|textual|chronology|morphology|source_text|internal_consistency|other.
+Allowed challenge types: {brief['challenge_types']}.
 Allowed severities: low|medium|high. Allowed witness targets:
 witness_a|witness_b|both|final_question. Allowed evidence kinds:
-jerome_phrase|jerome_lemma|scripture|glossary|morphology|semantic_rag|
-corpus_related|source_edition|chronology|proper_name|web_research.
+{brief['evidence_kinds']}.
+Do not include scratchpad reasoning, self-correction, or phrases such as
+"wait", "let me re-read", or "actually" in any JSON string.
 
 INPUT BUDGET NOTICE: {notice}
 
-TARGET LATIN:
+{brief['source_heading']}:
 <<<
-{chunk['target_latin']}
+{task.source_text(chunk)}
 
 {witness_a_section}
 
@@ -940,11 +987,11 @@ PRIORITIZED NON-PASS DETERMINISTIC FINDINGS:
 <<<
 {_compact_json(materials['checks'])}
 
-RELEVANT STRUCTURE (target offsets; Latin is not duplicated):
+{brief['structure_label']}:
 <<<
 {_compact_json(materials['structural'])}
 
-RELEVANT LEXICAL FLAGS (full morphology remains in immutable audit):
+{brief['lexical_label']}:
 <<<
 {_compact_json(materials['flags'])}
 
@@ -971,8 +1018,10 @@ def budgeted_prosecutor_prompt(
     max_evidence_requests: int,
     budget: dict[str, Any],
     witness_gate: dict[str, Any] | None = None,
+    task: TaskProfile | None = None,
 ) -> BudgetedProsecutorPrompt:
     """Build a prioritized bounded request; mandatory overflow returns no prompt."""
+    task = task or task_profile_from_chunk(chunk)
 
     max_prompt_bytes = int(budget.get("max_prompt_utf8_bytes", 44_000))
     max_request_bytes = int(budget.get("max_request_utf8_bytes", 44_000))
@@ -1001,7 +1050,7 @@ def budgeted_prosecutor_prompt(
         and item.get("flag_type") in {"ambiguous_senses", "not_found"}
     ]
     relevant_structure, lower_structure = _prosecutor_structure(
-        structural, str(chunk.get("target_latin") or ""), terms
+        structural, task.source_text(chunk), terms
     )
     materials: dict[str, Any] = {
         "checks": [_prosecutor_finding(item) for item in high],
@@ -1023,6 +1072,7 @@ def budgeted_prosecutor_prompt(
             max_evidence_requests=max_evidence_requests,
             witness_gate=witness_gate,
             notice=notice,
+            task=task,
         )
 
     def measure(prompt: str) -> dict[str, int]:
@@ -1040,6 +1090,7 @@ def budgeted_prosecutor_prompt(
             chunk, structural, lexical, checks, witness_a, witness_b,
             max_evidence_requests=max_evidence_requests,
             witness_gate=witness_gate,
+            task=task,
         )
     )
     prompt = render()
@@ -1099,8 +1150,9 @@ def budgeted_prosecutor_prompt(
     )
     witness_a_supplied = "[TEXT WITHHELD" not in supplied_sections[0]
     witness_b_supplied = "[TEXT WITHHELD" not in supplied_sections[1]
+    source_component_key = "source_text" if task.is_modernization else "target_latin"
     component_utf8_bytes = {
-        "target_latin": len(str(chunk.get("target_latin") or "").encode("utf-8")),
+        source_component_key: len(task.source_text(chunk).encode("utf-8")),
         "witness_a": len(witness_a.encode("utf-8")) if witness_a_supplied else 0,
         "witness_b": len(witness_b.encode("utf-8")) if witness_b_supplied else 0,
         "deterministic_findings": len(
@@ -1144,7 +1196,9 @@ def budgeted_prosecutor_prompt(
             "reason": "Only non-pass, dispute-relevant, ambiguity-bearing, or explicitly bounded components enter the model-facing view.",
         },
         "preserved": {
-            "target_latin_chars": len(str(chunk.get("target_latin") or "")),
+            (
+                "source_text_chars" if task.is_modernization else "target_latin_chars"
+            ): len(task.source_text(chunk)),
             "witness_a_chars_supplied": len(witness_a) if witness_a_supplied else 0,
             "witness_b_chars_supplied": len(witness_b) if witness_b_supplied else 0,
             "invalid_witnesses_withheld": list((witness_gate or {}).get("invalid_witnesses") or []) if (witness_gate or {}).get("mode") == "degraded" else [],
@@ -1163,24 +1217,30 @@ def budgeted_prosecutor_prompt(
 
 
 def grounded_prosecutor_prompt(
-    chunk: dict[str, Any], initial: dict[str, Any], evidence: list[dict[str, Any]]
+    chunk: dict[str, Any],
+    initial: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    task: TaskProfile | None = None,
 ) -> str:
+    task = task or task_profile_from_chunk(chunk)
+    brief = task.prosecutor_brief()
     return f"""Ground the earlier prosecutor report using ONLY the receipts supplied below.
 
 Do not treat a model assertion as evidence. Distinguish `no_evidence_found`
-from an unavailable subsystem. A retrieved Latin occurrence is evidence that
+from an unavailable subsystem. A retrieved source occurrence is evidence that
 text exists, but its interpretation may remain uncertain. CPDV is comparison
 help, not Latin authority. External research leads are not verified evidence.
 Withdraw or mark unresolved any allegation the receipts do not support.
+{_modernization_prosecutor_notice(task)}
 
 Return the same VALID JSON prosecutor schema as minified one-line JSON, with
 concrete receipt IDs cited inside `visible_basis` or the claim marked
 unresolved. New evidence requests must be empty because this is the bounded
 grounding round.
 
-TARGET LATIN:
+{brief['source_heading']}:
 <<<
-{chunk['target_latin']}
+{task.source_text(chunk)}
 
 INITIAL PROSECUTOR REPORT:
 <<<
@@ -1207,7 +1267,10 @@ def _render_adjudicator_prompt(
     compaction_notice: str,
     dense_json: bool = False,
     witness_gate: dict[str, Any] | None = None,
+    task: TaskProfile | None = None,
 ) -> str:
+    task = task or task_profile_from_chunk(chunk)
+    brief = task.adjudicator_brief()
     render_json = _compact_json if dense_json else _pretty
     witness_a_section, witness_b_section = _quorum_witness_sections(
         witness_a, witness_b, witness_gate, prosecutor=False
@@ -1217,8 +1280,7 @@ def _render_adjudicator_prompt(
     permitted_base_text = ", ".join(
         f"Witness {item.upper()}" for item in allowed_bases
     )
-    return f"""You are the final evidence-aware adjudicator for St Jerome's Commentary on
-Ezekiel. Decide from the authoritative TARGET LATIN; do not majority-vote.
+    return f"""{brief['role']}
 
 Evidence hierarchy:
 A. deterministic/source-verifiable evidence;
@@ -1232,11 +1294,12 @@ or B evidence and never overrule the authoritative target Latin.
 
 Agreement is weak evidence. Fluency is not evidence. Source-backed evidence
 outranks unsupported claims. Serious issues must not be resolved solely from C
-or D. Do not invent Scripture references, Jerome usage, lexicon facts,
+or D. Do not invent Scripture references, author usage, lexicon facts,
 history, chronology, or citations. Preserve unresolved ambiguity instead of
-forcing a choice. Check target coverage clause by clause.
+forcing a choice. {brief['task_rules']}
 A/B evidence must support each cited finding; it never supports another.
 {_quorum_notice(witness_gate)}
+{_modernization_adjudicator_notice(task)}
 
 EDIT PRECISION EXAMPLES:
 These examples illustrate the exacting standard required. Study them carefully.
@@ -1299,19 +1362,19 @@ JSON ONLY:
   "edits": [{{"old":"exact unique substring from selected/evolving witness", "new":"replacement text", "reason":"", "evidence_ids":[]}}],
   "summary": "precise decision summary",
   "coverage": {{"all_clauses_accounted_for": true, "omissions_corrected": []}},
-  "findings": [{{"latin":"exact substring", "english":"exact final wording", "type":"negation|subject_object|number|lexical|attachment|omission|addition|unsupported_certainty|scripture|proper_name|idiom|hebrew_greek|textual|chronology|morphology|source_text|internal_consistency|other", "severity":"low|medium|high", "resolution":"", "reason":"", "evidence_ids":[]}}],
-  "unresolved_issues": [{{"latin":"exact substring", "english":"provisional wording or empty", "alternatives":[], "missing_evidence":""}}],
-  "human_review_requests": [{{"latin":"exact substring", "english":"provisional wording or empty", "issue":"", "action":"specific source/construction to inspect"}}],
-  "evidence_requests": [{{"kind":"jerome_phrase|jerome_lemma|scripture|glossary|morphology|semantic_rag|corpus_related|source_edition|chronology|proper_name|web_research", "query":"", "reason":""}}],
+  "findings": [{{"latin":"exact authoritative-source substring", "english":"exact final wording", "type":"negation|subject_object|number|lexical|attachment|omission|addition|unsupported_certainty|scripture|proper_name|idiom|hebrew_greek|textual|chronology|morphology|source_text|internal_consistency|meaning_shift|paraphrase|preposition|theological_term|archaic_residue|archaic_introduction|reverse_modernization|over_modernization|rhetorical_structure|quotation|other", "severity":"low|medium|high", "resolution":"", "reason":"", "evidence_ids":[]}}],
+  "unresolved_issues": [{{"latin":"exact authoritative-source substring", "english":"provisional wording or empty", "alternatives":[], "missing_evidence":""}}],
+  "human_review_requests": [{{"latin":"exact authoritative-source substring", "english":"provisional wording or empty", "issue":"", "action":"specific source/construction to inspect"}}],
+  "evidence_requests": [{{"kind":"{brief['evidence_kinds']}", "query":"", "reason":""}}],
   "decision_basis": [{{"grade":"A|B|C|D", "claim":"", "evidence_ids":[]}}]
 }}
 
 INPUT BUDGET NOTICE:
 {compaction_notice}
 
-TARGET LATIN:
+{brief['source_heading']}:
 <<<
-{chunk['target_latin']}
+{task.source_text(chunk)}
 
 READ-ONLY CONTEXT:
 <<<
@@ -1355,6 +1418,7 @@ def adjudicator_prompt(
     prosecutor: dict[str, Any],
     evidence: list[dict[str, Any]],
     witness_gate: dict[str, Any] | None = None,
+    task: TaskProfile | None = None,
 ) -> str:
     """Render the historical compact prompt without applying a provider guard.
 
@@ -1375,6 +1439,7 @@ def adjudicator_prompt(
         context_after=str(chunk.get("context_after") or ""),
         compaction_notice="No additional budget compaction was applied.",
         witness_gate=witness_gate,
+        task=task,
     )
 
 
@@ -1391,6 +1456,7 @@ def budgeted_adjudicator_prompt(
     response_schema: dict[str, Any],
     budget: dict[str, Any],
     witness_gate: dict[str, Any] | None = None,
+    task: TaskProfile | None = None,
 ) -> BudgetedAdjudicatorPrompt:
     """Build an adjudicator prompt that cannot silently exceed configured limits.
 
@@ -1403,6 +1469,7 @@ def budgeted_adjudicator_prompt(
     provider.
     """
 
+    task = task or task_profile_from_chunk(chunk)
     max_prompt_bytes = int(budget.get("max_prompt_utf8_bytes", 45_000))
     max_request_bytes = int(budget.get("max_request_utf8_bytes", 52_000))
     max_tokens = int(budget.get("max_estimated_prompt_tokens", 15_000))
@@ -1449,6 +1516,7 @@ def budgeted_adjudicator_prompt(
             compaction_notice=notice,
             dense_json=materials["dense_json"],
             witness_gate=witness_gate,
+            task=task,
         )
 
     def fits(measurement: dict[str, int]) -> bool:
@@ -1546,7 +1614,9 @@ def budgeted_adjudicator_prompt(
         "compaction_steps": steps,
         "serialization": "dense_json" if materials["dense_json"] else "pretty_json",
         "preserved": {
-            "target_latin_chars": len(str(chunk.get("target_latin") or "")),
+            (
+                "source_text_chars" if task.is_modernization else "target_latin_chars"
+            ): len(task.source_text(chunk)),
             "witness_a_chars_supplied": (
                 len(witness_a)
                 if not witness_gate

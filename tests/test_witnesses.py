@@ -351,6 +351,81 @@ class WitnessBoundaryRegressionTest(unittest.TestCase):
         receipt = validate_witness_record(chunk(), persisted, witness="witness_a")
         self.assertIn("plain_text_response_shape", receipt["blocking_failures"])
 
+    def test_modernization_witness_blocks_archaic_introduction(self):
+        current = {
+            **chunk(),
+            "source_text": "For he says that God has made this manifest and will show mercy.",
+            "target_latin": "For he says that God has made this manifest and will show mercy.",
+            "task_type": "modernization",
+            "project": {"task_type": "modernization"},
+            "checks": {
+                "archaic_residue_terms": ["saith", "hath", "shew"],
+            },
+            "source_units": [
+                {
+                    "source_unit_id": "book01-homily-001-section-001",
+                    "text": "For he says that God has made this manifest and will show mercy.",
+                }
+            ],
+        }
+        raw = "For he saith that God hath made this manifest and will shew mercy."
+        persisted = record(
+            raw,
+            limit=1500,
+            generated=80,
+            proposal=parse_plain_witness_proposal(raw),
+        )
+        persisted["cache_material"]["inputs"] = {
+            "source_text": current["source_text"],
+            "request_context_before": "",
+            "request_context_after": "",
+        }
+
+        receipt = validate_witness_record(current, persisted, witness="witness_a")
+
+        self.assertIn("no_archaic_introduction", receipt["blocking_failures"])
+        detail = next(
+            item["detail"]
+            for item in receipt["checks"]
+            if item["check"] == "no_archaic_introduction"
+        )
+        self.assertEqual(detail["introduced_terms"], ["hath", "saith", "shew"])
+        self.assertFalse(receipt["eligible_as_adjudicator_base"])
+
+    def test_modernization_witness_blocks_quoted_archaic_introduction(self):
+        current = {
+            **chunk(),
+            "source_text": '"He says"',
+            "target_latin": '"He says"',
+            "task_type": "modernization",
+            "project": {"task_type": "modernization"},
+            "checks": {
+                "archaic_residue_terms": ["saith"],
+            },
+            "source_units": [
+                {
+                    "source_unit_id": "book01-homily-001-section-001",
+                    "text": '"He says"',
+                }
+            ],
+        }
+        raw = '"He saith"'
+        persisted = record(
+            raw,
+            limit=1500,
+            generated=80,
+            proposal=parse_plain_witness_proposal(raw),
+        )
+        persisted["cache_material"]["inputs"] = {
+            "source_text": current["source_text"],
+            "request_context_before": "",
+            "request_context_after": "",
+        }
+
+        receipt = validate_witness_record(current, persisted, witness="witness_a")
+
+        self.assertIn("no_archaic_introduction", receipt["blocking_failures"])
+
     def test_repeated_final_marker_is_disambiguated_by_output_boundary(self):
         current = {
             **chunk(),

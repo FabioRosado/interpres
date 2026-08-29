@@ -54,7 +54,28 @@ PROSECUTOR_CHALLENGE_TYPES = {
     "morphology",
     "source_text",
     "internal_consistency",
+    "meaning_shift",
+    "paraphrase",
+    "preposition",
+    "theological_term",
+    "archaic_residue",
+    "archaic_introduction",
+    "reverse_modernization",
+    "over_modernization",
+    "rhetorical_structure",
+    "quotation",
     "other",
+}
+
+PROSECUTOR_CHALLENGE_TYPE_ALIASES = {
+    "lexical_churn": "over_modernization",
+    "style_churn": "over_modernization",
+    "stylistic_rewriting": "over_modernization",
+    "synonym_churn": "over_modernization",
+    "unnecessary_lexical_churn": "over_modernization",
+    "unnecessary_rewriting": "over_modernization",
+    "unnecessary_style_change": "over_modernization",
+    "unnecessary_stylistic_rewriting": "over_modernization",
 }
 
 PROSECUTOR_WITNESS_TARGETS = {"witness_a", "witness_b", "both", "final_question"}
@@ -482,6 +503,8 @@ def expand_structural_wire(
 def validate_prosecutor(
     value: dict[str, Any], *, witness_gate: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    if "evidence_requests" not in value:
+        value["evidence_requests"] = []
     _require(value, {"status", "summary", "challenges", "evidence_requests"}, "prosecutor")
     if value["status"] not in PROSECUTOR_STATUSES:
         raise SchemaValidationError(f"Invalid prosecutor status: {value['status']!r}")
@@ -517,6 +540,8 @@ def validate_prosecutor(
             {"latin", "type", "severity", "witness_target", "claim", "visible_basis", "requires_external_evidence"},
             f"prosecutor challenge {index}",
         )
+        if challenge["type"] in PROSECUTOR_CHALLENGE_TYPE_ALIASES:
+            challenge["type"] = PROSECUTOR_CHALLENGE_TYPE_ALIASES[challenge["type"]]
         if challenge["type"] not in PROSECUTOR_CHALLENGE_TYPES:
             raise SchemaValidationError(
                 f"prosecutor challenge {index}.type is unsupported: {challenge['type']!r}"
@@ -549,6 +574,77 @@ def validate_evidence_request(
             f"{label}.kind is unsupported: {value['kind']!r}"
         )
     return value
+
+
+def prosecutor_schema() -> dict[str, Any]:
+    """Provider-enforced prosecutor contract with bounded review text."""
+
+    short_text = {"type": "string", "maxLength": 240}
+    source_text = {"type": "string", "maxLength": 220}
+    claim_text = {"type": "string", "maxLength": 320}
+    evidence_text = {"type": "string", "maxLength": 360}
+
+    def closed(
+        properties: dict[str, Any], required: list[str]
+    ) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    challenge = closed(
+        {
+            "latin": source_text,
+            "type": {
+                "type": "string",
+                "enum": sorted(PROSECUTOR_CHALLENGE_TYPES),
+            },
+            "severity": {"type": "string", "enum": sorted(SEVERITIES)},
+            "witness_target": {
+                "type": "string",
+                "enum": sorted(PROSECUTOR_WITNESS_TARGETS),
+            },
+            "claim": claim_text,
+            "visible_basis": evidence_text,
+            "requires_external_evidence": {"type": "boolean"},
+        },
+        [
+            "latin",
+            "type",
+            "severity",
+            "witness_target",
+            "claim",
+            "visible_basis",
+            "requires_external_evidence",
+        ],
+    )
+    evidence_request = closed(
+        {
+            "kind": {"type": "string", "enum": list(EVIDENCE_KINDS)},
+            "query": short_text,
+            "reason": short_text,
+        },
+        ["kind", "query", "reason"],
+    )
+    return closed(
+        {
+            "status": {"type": "string", "enum": sorted(PROSECUTOR_STATUSES)},
+            "summary": short_text,
+            "challenges": {
+                "type": "array",
+                "items": challenge,
+                "maxItems": MAX_PROSECUTOR_CHALLENGES,
+            },
+            "evidence_requests": {
+                "type": "array",
+                "items": evidence_request,
+                "maxItems": 6,
+            },
+        },
+        ["status", "summary", "challenges", "evidence_requests"],
+    )
 
 
 def adjudication_schema(
@@ -626,6 +722,16 @@ def adjudication_schema(
                     "morphology",
                     "source_text",
                     "internal_consistency",
+                    "meaning_shift",
+                    "paraphrase",
+                    "preposition",
+                    "theological_term",
+                    "archaic_residue",
+                    "archaic_introduction",
+                    "reverse_modernization",
+                    "over_modernization",
+                    "rhetorical_structure",
+                    "quotation",
                     "other",
                 ],
             },

@@ -609,10 +609,23 @@ def build_review_view(
     chunk_id = audit.get("chunk_id")
     if not isinstance(chunk_id, str) or not chunk_id:
         raise ReviewArtifactError("Audit is missing a stable chunk_id")
+    source = _dict(audit.get("source"))
     target_latin = audit.get("target_latin")
     if not isinstance(target_latin, str):
-        raise ReviewArtifactError(f"Chunk {chunk_id} target_latin is not text")
-    source = _dict(audit.get("source"))
+        target_latin = audit.get("source_text")
+    if not isinstance(target_latin, str):
+        raise ReviewArtifactError(f"Chunk {chunk_id} source text is not text")
+    project = _dict(audit.get("project"))
+    if not project:
+        project = {
+            "id": source.get("project_id") or "jerome-ezekiel",
+            "task_type": source.get("task_type") or "translation",
+            "operation_label": source.get("operation_label") or "translation",
+            "source_language": source.get("source_language") or "la",
+            "target_language": source.get("target_language") or "en",
+            "source_label": source.get("source_label") or "Latin",
+            "target_label": source.get("target_label") or "English",
+        }
     source_units = [item for item in _list(audit.get("source_units")) if isinstance(item, dict)]
     records = {
         str(key): value
@@ -921,6 +934,7 @@ def build_review_view(
             "final_source_mappings": not bool(final_mapped_units),
             "witness_source_mappings": not bool(witness_mapped_units),
             "prosecutor_initial_grounded_equivalence": True,
+            "arbitrary_source_to_target_alignment": True,
             "arbitrary_latin_to_english_alignment": True,
         },
         "note": "The reviewer UI highlights only these persisted relationships; absent alignments are shown as missing rather than inferred.",
@@ -947,6 +961,7 @@ def build_review_view(
 
     return {
         "review_schema_version": REVIEW_SCHEMA_VERSION,
+        "project": project,
         "chunk": {
             "book": source.get("book") or audit.get("book") or (
                 source_units[0].get("book") if source_units else None
@@ -968,6 +983,9 @@ def build_review_view(
         "source": {
             "state": "available",
             "target_latin": target_latin,
+            "source_text": target_latin,
+            "label": project.get("source_label") or "Latin",
+            "language": project.get("source_language") or "la",
             "context_before": audit.get("context_before"),
             "context_after": audit.get("context_after"),
             "units": source_units,
@@ -1229,10 +1247,12 @@ class ReviewRepository:
             "chunk_id": chunk["chunk_id"],
             "source_fingerprint": chunk.get("source_fingerprint"),
             "book": chunk.get("book"),
+            "project": chunk.get("project", {}),
             "source": chunk.get("source", {}),
             "source_units": chunk.get("source_units", []),
             "page_markers": chunk.get("page_markers", []),
             "target_latin": chunk.get("target_latin"),
+            "source_text": chunk.get("source_text") or chunk.get("target_latin"),
             "context_before": chunk.get("context_before"),
             "context_after": chunk.get("context_after"),
             "source_spans": chunk.get("source_spans", []),
@@ -1272,6 +1292,8 @@ class ReviewRepository:
                     artifact_errors=errors,
                 )
                 summary = dict(view["chunk"])
+                if summary.get("witness_mode") == "blocked":
+                    summary["witness_quorum"] = None
                 editorial = self.revision_store.state(
                     int(summary.get("book") or self.book),
                     str(summary["chunk_id"]),

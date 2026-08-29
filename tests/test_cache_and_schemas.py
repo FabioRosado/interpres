@@ -13,6 +13,7 @@ from interpres.schemas import (
     expand_adjudication_wire,
     expand_structural_wire,
     parse_json_response,
+    prosecutor_schema,
     structural_wire_schema,
     validate_adjudication,
     validate_evidence_request,
@@ -50,6 +51,26 @@ class SchemaTest(unittest.TestCase):
     def test_invalid_prosecutor_rejected(self):
         with self.assertRaises(SchemaValidationError):
             validate_prosecutor({"status": "proved_correct", "summary": "", "challenges": [], "evidence_requests": []})
+
+    def test_prosecutor_defaults_missing_empty_evidence_requests(self):
+        output = validate_prosecutor(
+            {
+                "status": "no_issue_found",
+                "summary": "No issue.",
+                "challenges": [],
+            }
+        )
+        self.assertEqual(output["evidence_requests"], [])
+
+    def test_prosecutor_provider_schema_is_closed_and_bounded(self):
+        schema = prosecutor_schema()
+        self.assertEqual(set(schema["required"]), {"status", "summary", "challenges", "evidence_requests"})
+        self.assertFalse(schema["additionalProperties"])
+        challenge = schema["properties"]["challenges"]["items"]
+        self.assertFalse(challenge["additionalProperties"])
+        self.assertEqual(challenge["properties"]["visible_basis"]["maxLength"], 360)
+        self.assertIn("over_modernization", challenge["properties"]["type"]["enum"])
+        self.assertNotIn("unnecessary_rewriting", challenge["properties"]["type"]["enum"])
 
     def test_prosecutor_status_and_request_kind_consistency(self):
         with self.assertRaisesRegex(SchemaValidationError, "at least one precise challenge"):
@@ -439,6 +460,12 @@ class SchemaTest(unittest.TestCase):
         base["challenges"][0]["type"] = "unsupported_type"
         with self.assertRaisesRegex(SchemaValidationError, "unsupported"):
             validate_prosecutor(base)
+
+    def test_prosecutor_known_modernization_aliases_are_canonicalized(self):
+        base = self._base_prosecutor()
+        base["challenges"][0]["type"] = "unnecessary_rewriting"
+        output = validate_prosecutor(base)
+        self.assertEqual(output["challenges"][0]["type"], "over_modernization")
 
     def test_prosecutor_allowed_challenge_types_valid(self):
         for challenge_type in PROSECUTOR_CHALLENGE_TYPES:

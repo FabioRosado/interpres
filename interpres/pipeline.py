@@ -48,11 +48,13 @@ from .schemas import (
     expand_structural_wire,
     normalize_adjudication_status,
     parse_json_response,
+    prosecutor_schema,
     structural_wire_schema,
     validate_adjudication,
     validate_prosecutor,
 )
 from .source import split_sentences
+from .tasks import TaskProfile, task_profile_from_chunk
 from .witnesses import (
     WITNESS_QUORUM_POLICY_VERSION,
     WITNESS_VALIDATION_POLICY_VERSION,
@@ -283,6 +285,7 @@ class EvidenceFirstPipeline:
         self.cache = StageCache(config.path_value("cache"))
         self.lexicon = lexicon or WhitakersWordsBackend()
         self.provider = provider or ModelProvider(config)
+        self.task = TaskProfile.from_config(config)
         self.model_profile = model_profile
         self.progress_callback = progress_callback
         self.adjudicator_input_budget = config.section(
@@ -342,7 +345,7 @@ class EvidenceFirstPipeline:
         policy = self.config.section("structural_output_budget")
         threshold = int(policy.get("large_sentence_threshold", 0))
         large_limit = int(policy.get("large_max_output_tokens", 0))
-        sentence_count = len(split_sentences(str(chunk.get("target_latin") or "")))
+        sentence_count = len(split_sentences(self.task.source_text(chunk)))
         if (
             threshold > 0
             and sentence_count >= threshold
@@ -709,6 +712,7 @@ class EvidenceFirstPipeline:
         witness_a: str,
         witness_b: str,
         allowed_base_witnesses: list[str] | None = None,
+        task: TaskProfile | None = None,
     ) -> tuple[
         Any,
         str | None,
@@ -718,20 +722,21 @@ class EvidenceFirstPipeline:
     ] | None:
         """Revalidate persisted JSON after deterministic contract improvements.
 
-        This never repairs or rewrites model text. If the complete raw response
-        still cannot pass the current exact-edit gate, the normal provider retry
-        remains in force.
+        For modernization only, otherwise structured decisions with invalid
+        exact edits degrade to human review while preserving the selected base
+        witness unchanged. The invalid edits are never applied.
         """
 
         raw = record.get("raw_response")
         if not isinstance(raw, str) or not raw.strip():
             return None
         try:
-            output = expand_adjudication_wire(
+            output = EvidenceFirstPipeline._expand_adjudication_for_task(
                 parse_json_response(raw),
                 witness_a,
                 witness_b,
                 allowed_base_witnesses=allowed_base_witnesses,
+                task=task,
             )
         except (json.JSONDecodeError, SchemaValidationError, ValueError, TypeError, KeyError):
             return None
@@ -749,6 +754,110 @@ class EvidenceFirstPipeline:
                 }
             ],
         )
+
+    @staticmethod
+    def _is_adjudication_exact_edit_error(exc: SchemaValidationError) -> bool:
+        message = str(exc)
+        return (
+            "adjudication edit" in message
+            and (
+                ".old must match the evolving base exactly once" in message
+                or "edits have no unambiguous application order" in message
+            )
+        )
+
+    @staticmethod
+    def _modernization_exact_edit_human_review(
+        value: dict[str, Any],
+        witness_a: str,
+        witness_b: str,
+        *,
+        allowed_base_witnesses: list[str] | tuple[str, ...] | None,
+        error: str,
+    ) -> dict[str, Any]:
+        fallback = json.loads(json.dumps(value, ensure_ascii=False))
+        fallback["status"] = "human_review"
+        fallback["edits"] = []
+        fallback["summary"] = (
+            str(
+                fallback.get("summary")
+                or "Adjudicator exact edits require human review."
+            ).strip()
+            or "Adjudicator exact edits require human review."
+        )
+        coverage = fallback.get("coverage")
+        if not isinstance(coverage, dict):
+            coverage = {}
+        coverage["all_clauses_accounted_for"] = bool(
+            coverage.get("all_clauses_accounted_for")
+        )
+        fallback["coverage"] = coverage
+        for field in (
+            "findings",
+            "unresolved_issues",
+            "human_review_requests",
+            "evidence_requests",
+            "decision_basis",
+        ):
+            if not isinstance(fallback.get(field), list):
+                fallback[field] = []
+        fallback["human_review_requests"].append(
+            {
+                "latin": "",
+                "english": "",
+                "issue": (
+                    "The adjudicator proposed exact replacement edits that "
+                    f"could not be applied mechanically: {error}"
+                ),
+                "action": (
+                    "Review the selected base witness manually. The machine "
+                    "final preserves that witness unchanged because the invalid "
+                    "edits were not applied."
+                ),
+            }
+        )
+        output = expand_adjudication_wire(
+            fallback,
+            witness_a,
+            witness_b,
+            allowed_base_witnesses=allowed_base_witnesses,
+        )
+        output["coverage"]["edit_application_mode"] = (
+            "invalid_exact_edit_human_review_fallback"
+        )
+        output["coverage"]["invalid_edit_error"] = error
+        return validate_adjudication(output)
+
+    @staticmethod
+    def _expand_adjudication_for_task(
+        value: dict[str, Any],
+        witness_a: str,
+        witness_b: str,
+        *,
+        allowed_base_witnesses: list[str] | tuple[str, ...] | None = None,
+        task: TaskProfile | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return expand_adjudication_wire(
+                value,
+                witness_a,
+                witness_b,
+                allowed_base_witnesses=allowed_base_witnesses,
+            )
+        except SchemaValidationError as exc:
+            if (
+                task is None
+                or not task.is_modernization
+                or not EvidenceFirstPipeline._is_adjudication_exact_edit_error(exc)
+            ):
+                raise
+            return EvidenceFirstPipeline._modernization_exact_edit_human_review(
+                value,
+                witness_a,
+                witness_b,
+                allowed_base_witnesses=allowed_base_witnesses,
+                error=str(exc),
+            )
 
     @staticmethod
     def _finalization_inputs(
@@ -912,6 +1021,8 @@ class EvidenceFirstPipeline:
     ) -> dict[str, Any]:
         """Apply the deterministic acceptance policy to a model proposal."""
 
+        task = task_profile_from_chunk(chunk)
+        source_text = task.source_text(chunk)
         decision = json.loads(json.dumps(original_decision, ensure_ascii=False))
         normalize_adjudication_status(decision)
         quorum = (witness_gate or {}).get("quorum") or (witness_gate or {}).get(
@@ -1192,7 +1303,7 @@ class EvidenceFirstPipeline:
                     }
                 )
         decision["final_checks"] = final_checks
-        enrich_adjudication_offsets(decision, chunk["target_latin"])
+        enrich_adjudication_offsets(decision, source_text)
         validate_adjudication(decision)
         return {
             "final_status": decision["status"],
@@ -1451,15 +1562,17 @@ class EvidenceFirstPipeline:
                 + ", ".join(name for name in candidates if not candidates[name])
             )
         pairs = []
-        identity_keys = (
-            "target_latin",
+        identity_keys = [
+            "source_text" if self.task.is_modernization else "target_latin",
             "context_before",
             "context_after",
             "request_context_before",
             "request_context_after",
             "prompt_digest",
             "response_schema_digest",
-        )
+        ]
+        if self.task.is_modernization:
+            identity_keys.append("task_type")
         for witness_a in candidates["witness_a"]:
             inputs_a = (witness_a.get("cache_material") or {}).get("inputs") or {}
             for witness_b in candidates["witness_b"]:
@@ -1505,6 +1618,7 @@ class EvidenceFirstPipeline:
     ) -> dict[str, Any]:
         if through not in STAGE_ORDER:
             raise ValueError(f"Unknown stage {through!r}; choose from {STAGE_ORDER}")
+        source_text = self.task.source_text(chunk)
         stop_index = STAGE_ORDER.index(through)
         records: dict[str, dict[str, Any]] = {}
         self._progress({
@@ -1522,22 +1636,62 @@ class EvidenceFirstPipeline:
 
         try:
             if should_run("morphology"):
+                if self.task.morphology_enabled:
+                    morphology_inputs = {
+                        "target_latin": chunk["target_latin"],
+                        "backend": self.lexicon.contract_version,
+                    }
+                    def morphology_operation():
+                        return (
+                            {
+                                "backend": {
+                                    "name": self.lexicon.backend_name,
+                                    "contract": self.lexicon.contract_version,
+                                },
+                                "morphology": analyze_morphology(
+                                    source_text, self.lexicon
+                                ),
+                                "flags": flags_to_json(
+                                    analyze_chunk(source_text, self.lexicon)
+                                ),
+                            },
+                            None,
+                            None,
+                            [],
+                            [
+                                {
+                                    "kind": "lexicon",
+                                    "backend": self.lexicon.backend_name,
+                                    "contract": self.lexicon.contract_version,
+                                }
+                            ],
+                        )
+                else:
+                    morphology_inputs = {
+                        "source_text": source_text,
+                        "task_type": self.task.task_type,
+                        "stage_policy": "disabled",
+                    }
+                    def morphology_operation():
+                        return (
+                            self.task.skipped_morphology_output(),
+                            None,
+                            None,
+                            [],
+                            [
+                                {
+                                    "kind": "stage_policy",
+                                    "stage": "morphology",
+                                    "enabled": False,
+                                }
+                            ],
+                        )
                 morphology = self._stage(
                     stage="morphology",
                     chunk=chunk,
-                    inputs={"target_latin": chunk["target_latin"], "backend": self.lexicon.contract_version},
+                    inputs=morphology_inputs,
                     dependencies=[],
-                    operation=lambda: (
-                        {
-                            "backend": {"name": self.lexicon.backend_name, "contract": self.lexicon.contract_version},
-                            "morphology": analyze_morphology(chunk["target_latin"], self.lexicon),
-                            "flags": flags_to_json(analyze_chunk(chunk["target_latin"], self.lexicon)),
-                        },
-                        None,
-                        None,
-                        [],
-                        [{"kind": "lexicon", "backend": self.lexicon.backend_name, "contract": self.lexicon.contract_version}],
-                    ),
+                    operation=morphology_operation,
                     force=force("morphology"),
                     retry_failed=retry_failed,
                 )
@@ -1547,30 +1701,67 @@ class EvidenceFirstPipeline:
 
             lexical = records["morphology"]["output"]
             if should_run("structural_parse"):
-                spec = self._structural_model(chunk)
-                prompt = structural_prompt(
-                    chunk,
-                    lexical["morphology"],
-                    max_forms=int(
-                        self.config.section("evidence").get(
-                            "morphology_prompt_forms", 180
+                if self.task.structural_enabled:
+                    spec = self._structural_model(chunk)
+                    prompt = structural_prompt(
+                        chunk,
+                        lexical["morphology"],
+                        max_forms=int(
+                            self.config.section("evidence").get(
+                                "morphology_prompt_forms", 180
+                            )
+                        ),
+                    )
+                    response_schema = structural_wire_schema(source_text)
+                    structural_inputs = {
+                        "target_latin": chunk["target_latin"],
+                        "context_before": chunk.get("context_before"),
+                        "context_after": chunk.get("context_after"),
+                        "morphology_cache_key": records["morphology"]["cache_key"],
+                        "prompt_digest": self._prompt_digest(prompt),
+                        "response_schema_digest": self._prompt_digest(
+                            json.dumps(response_schema, sort_keys=True)
+                        ),
+                    }
+                    def structural_operation():
+                        return self._structured_call(
+                            spec,
+                            prompt,
+                            lambda value: expand_structural_wire(
+                                value, source_text
+                            ),
+                            response_schema=response_schema,
                         )
-                    ),
-                )
-                response_schema = structural_wire_schema(chunk["target_latin"])
+                else:
+                    spec = None
+                    structural_inputs = {
+                        "source_text": source_text,
+                        "context_before": chunk.get("context_before"),
+                        "context_after": chunk.get("context_after"),
+                        "morphology_cache_key": records["morphology"]["cache_key"],
+                        "task_type": self.task.task_type,
+                        "stage_policy": "disabled",
+                    }
+                    def structural_operation():
+                        return (
+                            self.task.skipped_structural_output(chunk),
+                            None,
+                            None,
+                            [],
+                            [
+                                {
+                                    "kind": "stage_policy",
+                                    "stage": "structural_parse",
+                                    "enabled": False,
+                                }
+                            ],
+                        )
                 result = self._stage(
                     stage="structural_parse",
                     chunk=chunk,
-                    inputs={"target_latin": chunk["target_latin"], "context_before": chunk.get("context_before"), "context_after": chunk.get("context_after"), "morphology_cache_key": records["morphology"]["cache_key"], "prompt_digest": self._prompt_digest(prompt), "response_schema_digest": self._prompt_digest(json.dumps(response_schema, sort_keys=True))},
+                    inputs=structural_inputs,
                     dependencies=[records["morphology"]],
-                    operation=lambda: self._structured_call(
-                        spec,
-                        prompt,
-                        lambda value: expand_structural_wire(
-                            value, chunk["target_latin"]
-                        ),
-                        response_schema=response_schema,
-                    ),
+                    operation=structural_operation,
                     model=spec,
                     force=force("structural_parse"),
                     retry_failed=retry_failed,
@@ -1586,7 +1777,7 @@ class EvidenceFirstPipeline:
                 if not should_run(stage):
                     continue
                 spec = self._model(stage)
-                prompt = witness_prompt(chunk)
+                prompt = witness_prompt(chunk, self.task)
                 output_budget = estimate_witness_output_budget(
                     chunk,
                     prompt,
@@ -1618,7 +1809,11 @@ class EvidenceFirstPipeline:
                 result = self._stage(
                     stage=stage,
                     chunk=chunk,
-                    inputs={"target_latin": chunk["target_latin"], "context_before": chunk.get("context_before"), "context_after": chunk.get("context_after"), "request_context_before": "", "request_context_after": "", "context_policy": "auxiliary_latin_withheld_from_witness", "prompt_digest": self._prompt_digest(prompt), "request_prompt": prompt, "response_contract": "witness_plain_v4", "request_schema": None, "output_budget": output_budget, "blind_to": ["other_witness", "prosecutor", "adjudicator", "external_english"]},
+                    inputs=(
+                        {"target_latin": chunk["target_latin"], "context_before": chunk.get("context_before"), "context_after": chunk.get("context_after"), "request_context_before": "", "request_context_after": "", "context_policy": "auxiliary_latin_withheld_from_witness", "prompt_digest": self._prompt_digest(prompt), "request_prompt": prompt, "response_contract": "witness_plain_v4", "request_schema": None, "output_budget": output_budget, "blind_to": ["other_witness", "prosecutor", "adjudicator", "external_english"]}
+                        if self.task.is_translation
+                        else {"source_text": source_text, "context_before": chunk.get("context_before"), "context_after": chunk.get("context_after"), "request_context_before": "", "request_context_after": "", "context_policy": "auxiliary_context_withheld_from_witness", "task_type": self.task.task_type, "prompt_digest": self._prompt_digest(prompt), "request_prompt": prompt, "response_contract": "witness_plain_v4", "request_schema": None, "output_budget": output_budget, "blind_to": ["other_witness", "prosecutor", "adjudicator", "external_target_text"]}
+                    ),
                     dependencies=[],
                     operation=witness_operation,
                     model=spec,
@@ -1652,7 +1847,7 @@ class EvidenceFirstPipeline:
             )
             if should_run("deterministic_checks"):
                 editorial_precedents = self.editorial_memory.match(
-                    chunk["target_latin"]
+                    source_text
                 )
                 editorial_memory_identity = self.editorial_memory.cache_identity()
 
@@ -1686,7 +1881,11 @@ class EvidenceFirstPipeline:
                 result = self._stage(
                     stage="deterministic_checks",
                     chunk=chunk,
-                    inputs={"target_latin": chunk["target_latin"], "checks_version": CHECKS_VERSION, "witness_a_key": records["witness_a"]["cache_key"], "witness_b_key": records["witness_b"]["cache_key"], "witness_gate_key": records["witness_gate"]["cache_key"], "witness_quorum": records["witness_gate"]["output"].get("quorum"), "annotations": chunk.get("annotations", []), "page_markers": chunk.get("page_markers", []), "evidence_service": self.evidence.cache_identity(), "editorial_memory": editorial_memory_identity},
+                    inputs=(
+                        {"target_latin": chunk["target_latin"], "checks_version": CHECKS_VERSION, "witness_a_key": records["witness_a"]["cache_key"], "witness_b_key": records["witness_b"]["cache_key"], "witness_gate_key": records["witness_gate"]["cache_key"], "witness_quorum": records["witness_gate"]["output"].get("quorum"), "annotations": chunk.get("annotations", []), "page_markers": chunk.get("page_markers", []), "evidence_service": self.evidence.cache_identity(), "editorial_memory": editorial_memory_identity}
+                        if self.task.is_translation
+                        else {"source_text": source_text, "task_type": self.task.task_type, "checks_version": CHECKS_VERSION, "witness_a_key": records["witness_a"]["cache_key"], "witness_b_key": records["witness_b"]["cache_key"], "witness_gate_key": records["witness_gate"]["cache_key"], "witness_quorum": records["witness_gate"]["output"].get("quorum"), "annotations": chunk.get("annotations", []), "page_markers": chunk.get("page_markers", []), "evidence_service": self.evidence.cache_identity(), "editorial_memory": editorial_memory_identity}
+                    ),
                     dependencies=[records["witness_a"], records["witness_b"], records["witness_gate"]],
                     operation=deterministic_checks_operation,
                     force=force("deterministic_checks"),
@@ -1700,6 +1899,7 @@ class EvidenceFirstPipeline:
             checks = records["deterministic_checks"]["output"]
             if should_run("prosecutor_initial"):
                 spec = self._model("prosecutor")
+                response_schema = prosecutor_schema()
                 budgeted_prompt = budgeted_prosecutor_prompt(
                     chunk,
                     structural,
@@ -1717,6 +1917,7 @@ class EvidenceFirstPipeline:
                     ),
                     budget=self.prosecutor_input_budget,
                     witness_gate=witness_gate,
+                    task=self.task,
                 )
 
                 def initial_prosecutor_operation():
@@ -1727,6 +1928,7 @@ class EvidenceFirstPipeline:
                             spec,
                             budgeted_prompt.prompt,
                             lambda value: validate_prosecutor(value, witness_gate=witness_gate),
+                            response_schema=response_schema,
                         )
                     )
                     provenance.append(
@@ -1741,7 +1943,7 @@ class EvidenceFirstPipeline:
                 result = self._stage(
                     stage="prosecutor_initial",
                     chunk=chunk,
-                    inputs={"prompt_digest": self._prompt_digest(budgeted_prompt.prompt) if budgeted_prompt.prompt is not None else None, "request_prompt": budgeted_prompt.prompt, "input_budget": budgeted_prompt.receipt, "witness_quorum": witness_gate.get("quorum"), "valid_witnesses": witness_gate.get("valid_witnesses", []), "invalid_witnesses_supplied_to_model": False if witness_gate.get("mode") == "degraded" else None, "dependency_keys": [records[name]["cache_key"] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")]},
+                    inputs={"prompt_digest": self._prompt_digest(budgeted_prompt.prompt) if budgeted_prompt.prompt is not None else None, "request_prompt": budgeted_prompt.prompt, "input_budget": budgeted_prompt.receipt, "response_schema_digest": self._prompt_digest(json.dumps(response_schema, sort_keys=True)), "witness_quorum": witness_gate.get("quorum"), "valid_witnesses": witness_gate.get("valid_witnesses", []), "invalid_witnesses_supplied_to_model": False if witness_gate.get("mode") == "degraded" else None, "dependency_keys": [records[name]["cache_key"] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")]},
                     dependencies=[records[name] for name in ("morphology", "structural_parse", "witness_a", "witness_b", "witness_gate", "deterministic_checks")],
                     operation=initial_prosecutor_operation,
                     model=spec,
@@ -1842,17 +2044,21 @@ class EvidenceFirstPipeline:
                         prompt_digest = None
                     else:
                         spec = self._model("prosecutor")
-                        prompt = grounded_prosecutor_prompt(chunk, initial, prosecutor_evidence)
+                        response_schema = prosecutor_schema()
+                        prompt = grounded_prosecutor_prompt(
+                            chunk, initial, prosecutor_evidence, self.task
+                        )
                         prompt_digest = self._prompt_digest(prompt)
                         operation = lambda: self._structured_call(
                             spec,
                             prompt,
                             lambda value: validate_prosecutor(value, witness_gate=witness_gate),
+                            response_schema=response_schema,
                         )
                 result = self._stage(
                     stage="prosecutor_grounded",
                     chunk=chunk,
-                    inputs={"initial_key": records["prosecutor_initial"]["cache_key"], "research_key": records["research_prosecutor"]["cache_key"], "round_limit": configured_rounds, "prompt_digest": prompt_digest},
+                    inputs={"initial_key": records["prosecutor_initial"]["cache_key"], "research_key": records["research_prosecutor"]["cache_key"], "round_limit": configured_rounds, "prompt_digest": prompt_digest, "response_schema_digest": self._prompt_digest(json.dumps(response_schema, sort_keys=True)) if spec is not None else None},
                     dependencies=[records["prosecutor_initial"], records["research_prosecutor"]],
                     operation=operation,
                     model=spec,
@@ -1893,6 +2099,7 @@ class EvidenceFirstPipeline:
                     response_schema=response_schema,
                     budget=self.adjudicator_input_budget,
                     witness_gate=witness_gate,
+                    task=self.task,
                 )
 
                 def initial_adjudicator_operation():
@@ -1902,11 +2109,12 @@ class EvidenceFirstPipeline:
                         self._structured_call(
                             spec,
                             budgeted_prompt.prompt,
-                            lambda value: expand_adjudication_wire(
+                            lambda value: self._expand_adjudication_for_task(
                                 value,
                                 witness_a,
                                 witness_b,
                                 allowed_base_witnesses=allowed_base_witnesses,
+                                task=self.task,
                             ),
                             response_schema=response_schema,
                         )
@@ -1957,6 +2165,7 @@ class EvidenceFirstPipeline:
                         witness_a,
                         witness_b,
                         allowed_base_witnesses,
+                        self.task,
                     ),
                 )
                 records["adjudicator_initial"] = result.record
@@ -2078,6 +2287,7 @@ class EvidenceFirstPipeline:
                         response_schema=final_response_schema,
                         budget=self.adjudicator_input_budget,
                         witness_gate=witness_gate,
+                        task=self.task,
                     )
                     final_prompt_digest = (
                         self._prompt_digest(final_budgeted_prompt.prompt)
@@ -2097,11 +2307,12 @@ class EvidenceFirstPipeline:
                             self._structured_call(
                                 final_spec,
                                 final_budgeted_prompt.prompt,
-                                lambda value: expand_adjudication_wire(
+                                lambda value: self._expand_adjudication_for_task(
                                     value,
                                     witness_a,
                                     witness_b,
                                     allowed_base_witnesses=allowed_base_witnesses,
+                                    task=self.task,
                                 ),
                                 response_schema=final_response_schema,
                             )
@@ -2159,6 +2370,7 @@ class EvidenceFirstPipeline:
                         witness_a,
                         witness_b,
                         allowed_base_witnesses,
+                        self.task,
                     ),
                 )
                 records["adjudicator"] = result.record
@@ -2240,22 +2452,22 @@ class EvidenceFirstPipeline:
     ) -> dict[str, Any]:
         """Run an isolated optional witness without promoting it to production."""
         spec = self._model(role)
-        prompt = witness_prompt(chunk)
+        prompt = witness_prompt(chunk, self.task)
         stage = "experimental_witness_" + "".join(
             char if char.isalnum() or char == "_" else "_" for char in role
         )
 
         def operation():
             response = self.provider.chat(spec, prompt, json_mode=False)
-            translation = response.content.strip()
-            if not translation:
+            rendered = response.content.strip()
+            if not rendered:
                 raise ModelOutputError(
-                    "Experimental witness returned an empty translation",
+                    f"Experimental witness returned an empty {self.task.operation_label}",
                     raw_response=response.content,
                     response=response,
                 )
             return (
-                {"translation": translation, "production_role": False},
+                {"translation": rendered, "production_role": False},
                 response.content,
                 response.used_model,
                 response.attempts,
@@ -2263,10 +2475,21 @@ class EvidenceFirstPipeline:
             )
 
         try:
-            return self._stage(
-                stage=stage,
-                chunk=chunk,
-                inputs={
+            if self.task.is_modernization:
+                inputs = {
+                    "source_text": self.task.source_text(chunk),
+                    "task_type": self.task.task_type,
+                    "context_before": chunk.get("context_before"),
+                    "context_after": chunk.get("context_after"),
+                    "blind_to": [
+                        "production_witnesses",
+                        "prosecutor",
+                        "adjudicator",
+                        "external_target_text",
+                    ],
+                }
+            else:
+                inputs = {
                     "target_latin": chunk["target_latin"],
                     "context_before": chunk.get("context_before"),
                     "context_after": chunk.get("context_after"),
@@ -2276,7 +2499,11 @@ class EvidenceFirstPipeline:
                         "adjudicator",
                         "external_english",
                     ],
-                },
+                }
+            return self._stage(
+                stage=stage,
+                chunk=chunk,
+                inputs=inputs,
                 dependencies=[],
                 operation=operation,
                 model=spec,
@@ -2350,10 +2577,20 @@ class EvidenceFirstPipeline:
             "pipeline_version": self.config.pipeline_version,
             "execution_profile": selected_profile,
             "chunk_id": chunk["chunk_id"],
+            "project": {
+                "id": self.task.project_id,
+                "task_type": self.task.task_type,
+                "operation_label": self.task.operation_label,
+                "source_language": self.task.source_language,
+                "target_language": self.task.target_language,
+                "source_label": self.task.source_label,
+                "target_label": self.task.target_label,
+            },
             "source": chunk["source"],
             "source_units": chunk["source_units"],
             "page_markers": chunk["page_markers"],
             "target_latin": chunk["target_latin"],
+            "source_text": self.task.source_text(chunk),
             "context_before": chunk["context_before"],
             "context_after": chunk["context_after"],
             "source_spans": chunk["source_spans"],

@@ -22,6 +22,22 @@ def _json(value: Any) -> None:
 def run_doctor(config: PipelineConfig) -> int:
     root = config.root
     checks: list[dict[str, Any]] = []
+    enabled_evidence = config.enabled_evidence_kinds()
+
+    def evidence_enabled(*kinds: str) -> bool:
+        return enabled_evidence is None or any(kind in enabled_evidence for kind in kinds)
+
+    def model_uses_provider(role: str, provider: str) -> bool:
+        try:
+            spec = config.model(role)
+        except Exception:
+            return False
+        current = spec
+        while current is not None:
+            if current.provider == provider:
+                return True
+            current = current.fallback
+        return False
 
     # 1. Python version
     version = sys.version_info
@@ -31,12 +47,15 @@ def run_doctor(config: PipelineConfig) -> int:
         f"{version.major}.{version.minor}.{version.micro}",
     ))
 
-    # 2. whitakers_words availability (optional but required for morphology)
-    try:
-        from whitakers_words.parser import Parser  # noqa: F401
-        checks.append(_check("whitakers_words", True, "imports successfully"))
-    except Exception as exc:
-        checks.append(_check("whitakers_words", False, f"not available: {exc}"))
+    # 2. whitakers_words availability (optional but required for Latin morphology)
+    if config.stage_enabled("morphology") or evidence_enabled("morphology", "glossary", "jerome_lemma"):
+        try:
+            from whitakers_words.parser import Parser  # noqa: F401
+            checks.append(_check("whitakers_words", True, "imports successfully"))
+        except Exception as exc:
+            checks.append(_check("whitakers_words", False, f"not available: {exc}"))
+    else:
+        checks.append(_check("whitakers_words", True, "disabled for this project"))
 
     # 3. Source files for configured books
     for book_str, source_path in config.data.get("source", {}).get("books", {}).items():
@@ -49,17 +68,23 @@ def run_doctor(config: PipelineConfig) -> int:
             str(path),
         ))
 
-    # 4. Corpus corpora / vulgate
-    vulgate = config.path_value("vulgate")
-    checks.append(_check("vulgate_tsv", vulgate.exists(), str(vulgate)))
+    # 4. Scripture corpora
+    if evidence_enabled("scripture"):
+        vulgate = config.path_value("vulgate")
+        checks.append(_check("vulgate_tsv", vulgate.exists(), str(vulgate)))
+    else:
+        checks.append(_check("vulgate_tsv", True, "scripture evidence disabled"))
 
     # 5. CPDV (optional)
-    cpcdv_path = config.path_value("cpdv")
-    checks.append(_check(
-        "cpdv_corpus",
-        cpcdv_path.exists() and any(cpcdv_path.iterdir()),
-        str(cpcdv_path),
-    ))
+    if evidence_enabled("scripture"):
+        cpcdv_path = config.path_value("cpdv")
+        checks.append(_check(
+            "cpdv_corpus",
+            cpcdv_path.exists() and any(cpcdv_path.iterdir()),
+            str(cpcdv_path),
+        ))
+    else:
+        checks.append(_check("cpdv_corpus", True, "scripture evidence disabled"))
 
     # 6. Artifacts directory
     artifacts = config.path_value("artifacts")
@@ -67,7 +92,12 @@ def run_doctor(config: PipelineConfig) -> int:
 
     # 7. Cache directory
     cache = config.path_value("cache")
-    checks.append(_check("cache_dir", cache.exists(), str(cache)))
+    cache_ok = cache.exists() or cache.parent.exists()
+    checks.append(_check(
+        "cache_dir",
+        cache_ok,
+        str(cache) if cache.exists() else f"{cache} (will be created on first run)",
+    ))
 
     # 8. Concordance freshness
     concordance = config.path_value("concordance")
@@ -84,12 +114,20 @@ def run_doctor(config: PipelineConfig) -> int:
         checks.append(_check("retrieval_index", False, "run build-retrieval-index first"))
 
     # 10. OPENROUTER_API_KEY (optional)
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    checks.append(_check(
-        "openrouter_api_key",
-        bool(api_key),
-        "set" if api_key else "not set (optional)",
-    ))
+    openrouter_roles = [
+        role
+        for role in ("witness_a", "witness_b", "structural_parser", "prosecutor", "adjudicator")
+        if model_uses_provider(role, "openrouter")
+    ]
+    if openrouter_roles:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        checks.append(_check(
+            "openrouter_api_key",
+            bool(api_key),
+            "set" if api_key else "required for: " + ", ".join(openrouter_roles),
+        ))
+    else:
+        checks.append(_check("openrouter_api_key", True, "no active OpenRouter roles"))
 
     failed = [c for c in checks if not c["ok"]]
     result = {"ok": not failed, "checks": checks}
