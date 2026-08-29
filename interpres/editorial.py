@@ -250,6 +250,122 @@ class EditorialRevisionStore:
             ),
         )
 
+    def all_revisions(self, *, book: int | None = None) -> list[dict[str, Any]]:
+        if not self.root.exists():
+            return []
+        values = []
+        for path in sorted(self.root.glob("book*/**/revision-*.json")):
+            revision = _read_revision(path)
+            if not revision:
+                continue
+            try:
+                revision_book = int(revision.get("book"))
+            except (TypeError, ValueError):
+                continue
+            if book is not None and revision_book != int(book):
+                continue
+            chunk_id = str(revision.get("chunk_id") or "")
+            try:
+                _safe_chunk_id(chunk_id)
+            except EditorialRevisionError:
+                continue
+            values.append(revision)
+        return sorted(
+            values,
+            key=lambda item: (
+                int(item.get("book", 0)),
+                str(item.get("chunk_id", "")),
+                int(item.get("revision_number", 0)),
+                str(item.get("created_at", "")),
+                str(item.get("revision_id", "")),
+            ),
+        )
+
+    def export_package(self, *, book: int | None = None) -> dict[str, Any]:
+        revisions = self.all_revisions(book=book)
+        return {
+            "schema_version": "interpres-editorial-export-v1",
+            "revision_schema_version": EDITORIAL_REVISION_SCHEMA_VERSION,
+            "generated_at": utc_now(),
+            "book": int(book) if book is not None else None,
+            "revision_count": len(revisions),
+            "revisions": revisions,
+        }
+
+    def import_package(
+        self,
+        package: dict[str, Any],
+        *,
+        book: int | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(package, dict):
+            raise EditorialRevisionError("Import body must be an object")
+        if package.get("schema_version") != "interpres-editorial-export-v1":
+            raise EditorialRevisionError("Unsupported editorial export schema")
+        revisions = package.get("revisions")
+        if not isinstance(revisions, list) or len(revisions) > 10_000:
+            raise EditorialRevisionError("Import revisions must be a bounded list")
+        imported = 0
+        skipped = 0
+        errors: list[dict[str, Any]] = []
+        with self._lock:
+            existing_ids = {
+                str(item.get("revision_id"))
+                for item in self.all_revisions(book=book)
+                if item.get("revision_id")
+            }
+            for index, raw in enumerate(revisions):
+                if not isinstance(raw, dict):
+                    errors.append({"index": index, "message": "revision must be an object"})
+                    continue
+                if raw.get("schema_version") != EDITORIAL_REVISION_SCHEMA_VERSION:
+                    errors.append({"index": index, "message": "unsupported revision schema"})
+                    continue
+                try:
+                    revision_book = int(raw.get("book"))
+                    if book is not None and revision_book != int(book):
+                        skipped += 1
+                        continue
+                    chunk_id = _safe_chunk_id(str(raw.get("chunk_id") or ""))
+                    revision_id = str(raw.get("revision_id") or "")
+                    revision_number = int(raw.get("revision_number", 0))
+                    created_at = str(raw.get("created_at") or "")
+                    if (
+                        not revision_id.startswith("editorial-")
+                        or revision_number < 1
+                        or not created_at
+                        or not isinstance(raw.get("machine"), dict)
+                        or not isinstance(raw.get("editorial"), dict)
+                    ):
+                        raise EditorialRevisionError("invalid revision record")
+                except (TypeError, ValueError, EditorialRevisionError) as exc:
+                    errors.append({"index": index, "message": str(exc)})
+                    continue
+                if revision_id in existing_ids:
+                    skipped += 1
+                    continue
+                directory = self.chunk_path(revision_book, chunk_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                path = directory / (
+                    f"revision-{revision_number:06d}-{stamp}-{revision_id}.json"
+                )
+                try:
+                    with path.open("x", encoding="utf-8", newline="\n") as handle:
+                        json.dump(raw, handle, ensure_ascii=False, indent=2)
+                        handle.write("\n")
+                except FileExistsError:
+                    skipped += 1
+                    continue
+                existing_ids.add(revision_id)
+                imported += 1
+        return {
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors,
+            "revision_count": len(revisions),
+        }
+
     def latest(self, book: int, chunk_id: str) -> dict[str, Any] | None:
         values = self.revisions(book, chunk_id)
         return values[-1] if values else None

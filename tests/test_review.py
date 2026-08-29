@@ -995,6 +995,24 @@ class ReviewRepositoryTest(unittest.TestCase):
                     saved = json.loads(response.read())
                 self.assertEqual(saved["revision"]["revision_number"], 1)
                 self.assertEqual(saved["revision"]["editorial"]["state"], "draft")
+                with urllib.request.urlopen(
+                    running.url
+                    + f"api/editorial/export?project={config.project_id}&book=1",
+                    timeout=5,
+                ) as response:
+                    exported = json.loads(response.read())
+                self.assertEqual(exported["revision_count"], 1)
+                import_request = urllib.request.Request(
+                    running.url
+                    + f"api/editorial/import?project={config.project_id}&book=1",
+                    data=json.dumps(exported).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(import_request, timeout=5) as response:
+                    imported = json.loads(response.read())
+                self.assertEqual(imported["imported"], 0)
+                self.assertEqual(imported["skipped"], 1)
                 self.assertEqual(
                     machine_before,
                     [

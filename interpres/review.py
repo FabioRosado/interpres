@@ -1372,3 +1372,19 @@ class ReviewRepository:
             "revision": revision,
             "editorial": editorial,
         }
+
+    def export_editorial_revisions(self) -> dict[str, Any]:
+        package = self.revision_store.export_package(book=self.book)
+        return {
+            **package,
+            "project": self.config.project_id,
+            "profile": self.profile,
+        }
+
+    def import_editorial_revisions(self, package: dict[str, Any]) -> dict[str, Any]:
+        result = self.revision_store.import_package(package, book=self.book)
+        return {
+            **result,
+            "project": self.config.project_id,
+            "book": self.book,
+        }

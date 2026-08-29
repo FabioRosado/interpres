@@ -52,6 +52,21 @@ export async function saveRevision(
   });
 }
 
+export async function exportEditorial(selection: ReviewSelection): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(`/editorial/export${selectionQuery(selection)}`);
+}
+
+export async function importEditorial(
+  selection: ReviewSelection,
+  packageBody: Record<string, unknown>,
+): Promise<{ imported: number; skipped: number; errors: Record<string, unknown>[] }> {
+  return requestJson(`/editorial/import${selectionQuery(selection)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(packageBody),
+  });
+}
+
 export async function checkHealth(): Promise<{ status: string; mode: string; book: string }> {
   return requestJson<{ status: string; mode: string; book: string }>('/health');
 }

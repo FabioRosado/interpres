@@ -149,6 +149,17 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(HTTPStatus.OK, repository.list_chunks())
             return
+        if route == "/api/editorial/export":
+            try:
+                repository = self._repository_from_query()
+            except (ConfigurationError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_project_selection", "message": str(exc)},
+                )
+                return
+            self._send_json(HTTPStatus.OK, repository.export_editorial_revisions())
+            return
         if route.startswith("/api/chunks/"):
             try:
                 repository = self._repository_from_query()
@@ -188,6 +199,42 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         route = urlparse(self.path).path
+        if route == "/api/editorial/import":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = -1
+            if length < 0 or length > 25_000_000:
+                self._send_json(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    {"error": "request_too_large"},
+                )
+                return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_json", "message": str(exc)},
+                )
+                return
+            try:
+                repository = self._repository_from_query()
+                result = repository.import_editorial_revisions(payload)
+            except (ConfigurationError, ValueError) as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_project_selection", "message": str(exc)},
+                )
+                return
+            except EditorialRevisionError as exc:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_editorial_import", "message": str(exc)},
+                )
+                return
+            self._send_json(HTTPStatus.CREATED, result)
+            return
         parts = [unquote(part) for part in route.strip("/").split("/")]
         if (
             len(parts) == 5

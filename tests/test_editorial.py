@@ -177,6 +177,38 @@ class EditorialRevisionStoreTest(unittest.TestCase):
             self.assertIn("not lexical", matches[0]["limits"])
             self.assertEqual(memory.match("nonn venit ad eos"), [])
 
+    def test_export_import_package_is_append_only_and_deduplicated(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as target:
+            source_store = EditorialRevisionStore(Path(source))
+            revision = source_store.save(
+                book=1,
+                chunk_id="book01-test",
+                payload=self.payload(state="approved", reusable=True),
+                machine=self.machine(),
+                issues=self.issues(),
+            )
+            package = source_store.export_package(book=1)
+            self.assertEqual(package["revision_count"], 1)
+            target_store = EditorialRevisionStore(Path(target))
+
+            first = target_store.import_package(package, book=1)
+            second = target_store.import_package(package, book=1)
+
+            self.assertEqual(first["imported"], 1)
+            self.assertEqual(first["skipped"], 0)
+            self.assertEqual(second["imported"], 0)
+            self.assertEqual(second["skipped"], 1)
+            self.assertEqual(
+                target_store.latest(1, "book01-test")["revision_id"],
+                revision["revision_id"],
+            )
+            self.assertEqual(
+                EditorialMemoryIndex(Path(target)).match("Et non venit ad eos.")[0][
+                    "approved_english"
+                ],
+                "did not come",
+            )
+
 
 class EditorialPipelineIntegrationTest(unittest.TestCase):
     def test_editorial_precedent_is_visible_to_reviewers_with_correct_limits(self):

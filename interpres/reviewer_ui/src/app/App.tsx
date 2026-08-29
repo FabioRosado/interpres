@@ -11,7 +11,7 @@ import { IssueLedger } from '../components/IssueLedger/IssueLedger';
 import { EvidenceInspector } from '../components/Evidence/EvidenceInspector';
 import { DecisionTrail } from '../components/DecisionTrail/DecisionTrail';
 import { LoadingPanel, ErrorPanel } from '../components/LoadingPanel';
-import { getProjects, getOverview, getChunk, saveRevision } from '../api/reviewApi';
+import { exportEditorial, getProjects, getOverview, getChunk, importEditorial, saveRevision } from '../api/reviewApi';
 import type {
   AppState,
   EditorialAnnotation,
@@ -75,6 +75,7 @@ export const App = () => {
   const [state, setState] = useState<AppState>({ ...initialState, loading: true });
   const [editorialText, setEditorialText] = useState('');
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [transferMessage, setTransferMessage] = useState<string | null>(null);
   const [forensicsOpen, setForensicsOpen] = useState(false);
   const [referenceMode, setReferenceMode] = useState<'latin' | 'machine'>('latin');
 
@@ -296,6 +297,44 @@ export const App = () => {
     void loadOverview(state.currentChunkId);
   };
 
+  const handleExportEditorial = async () => {
+    const selection = currentSelection();
+    if (!selection) return;
+    setTransferMessage(null);
+    try {
+      const payload = await exportEditorial(selection);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15);
+      link.href = url;
+      link.download = `interpres-editorial-${selection.projectId}-book${selection.book}-${stamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setTransferMessage(`Exported ${Number(payload.revision_count || 0)} revisions.`);
+    } catch (error) {
+      setTransferMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleImportEditorial = async (file: File) => {
+    const selection = currentSelection();
+    if (!selection) return;
+    if (state.dirty && !window.confirm('Discard unsaved editorial changes and import revisions?')) return;
+    setTransferMessage(null);
+    try {
+      const payload = JSON.parse(await file.text()) as Record<string, unknown>;
+      const result = await importEditorial(selection, payload);
+      const errorCount = result.errors?.length || 0;
+      setTransferMessage(`Imported ${result.imported}; skipped ${result.skipped}; errors ${errorCount}.`);
+      await loadOverview(state.currentChunkId, selection, state.projectCatalog);
+    } catch (error) {
+      setTransferMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const handleSelectTarget = (target: SelectionTarget | null, openInspector = true) => {
     setState((prev) => ({
       ...prev,
@@ -346,7 +385,12 @@ export const App = () => {
   if (!state.view) {
     return (
       <div className={`app-shell review-mode-${state.reviewMode}${state.focusEditor ? ' editor-focus-mode' : ''}`}>
-        <AppHeader onRefresh={requestRefresh} />
+        <AppHeader
+          onRefresh={requestRefresh}
+          onExport={handleExportEditorial}
+          onImport={handleImportEditorial}
+          transferMessage={transferMessage}
+        />
         <ChunkNavigator
           projectCatalog={state.projectCatalog}
           selectedProjectId={state.selectedProjectId}
@@ -367,7 +411,12 @@ export const App = () => {
 
   return (
     <div className={`app-shell review-mode-${state.reviewMode}${state.focusEditor ? ' editor-focus-mode' : ''}`}>
-      <AppHeader onRefresh={requestRefresh} />
+      <AppHeader
+        onRefresh={requestRefresh}
+        onExport={handleExportEditorial}
+        onImport={handleImportEditorial}
+        transferMessage={transferMessage}
+      />
       <ChunkNavigator
         projectCatalog={state.projectCatalog}
         selectedProjectId={state.selectedProjectId}

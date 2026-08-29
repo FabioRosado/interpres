@@ -31,6 +31,26 @@ h3 { font-size: 1.13rem; color: var(--indigo); }
 h4 { font-size: .96rem; }
 
 .masthead-actions { gap: .65rem; }
+.import-button {
+  position: relative;
+  cursor: pointer;
+}
+.import-button input {
+  position: absolute;
+  inset: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.transfer-message {
+  max-width: 28ch;
+  overflow: hidden;
+  color: #fffdf7;
+  font-size: .68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .sidebar {
   grid-area: sidebar;
