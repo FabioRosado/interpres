@@ -16,8 +16,8 @@ export const ResolutionCard = ({ issue, filter, isSelected, resolution, onChange
   if (filter === 'resolved' && !isResolved) return null;
 
   return (
-    <details className={`resolution-card related-record ${isSelected ? 'selected' : ''}`} data-issue-id={issue.issue_id} onClick={onSelect}>
-      <summary>
+    <details className={`resolution-card related-record ${isSelected ? 'selected' : ''}`} data-issue-id={issue.issue_id}>
+      <summary onClick={onSelect}>
         <span className="resolution-summary">
           <b>{issue.message || humanize(issue.origin)}</b>
           <small>{humanize(issue.origin)} · {humanize(issue.severity || issue.status || 'ungraded')}</small>

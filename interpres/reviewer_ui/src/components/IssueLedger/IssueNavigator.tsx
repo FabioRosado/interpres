@@ -67,6 +67,7 @@ export const IssueNavigator = ({
         <button className="quiet-button" type="button" onClick={() => move(1)} disabled={!issues.length}>Next issue →</button>
         {!docked && <button className="quiet-button" type="button" onClick={onToggleLedger} aria-expanded={ledgerOpen}>{ledgerOpen ? 'Close Ledger' : 'Open Ledger'}</button>}
         {selectedTarget && !inspectorOpen && <button className="quiet-button" type="button" onClick={onReopenInspector}>Reopen details</button>}
+        {selectedTarget && inspectorOpen && <button className="quiet-button primary-button" type="button" onClick={onReopenInspector}>Open details</button>}
       </div>
     </section>
   );

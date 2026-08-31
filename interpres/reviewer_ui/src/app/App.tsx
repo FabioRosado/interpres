@@ -528,7 +528,7 @@ export const App = () => {
                   ledgerOpen
                   docked
                   inspectorOpen={state.evidenceInspectorOpen}
-                  onSelectTarget={handleSelectTarget}
+                  onSelectTarget={(target) => handleSelectTarget(target, false)}
                   onToggleLedger={() => undefined}
                   onReopenInspector={() => setState((prev) => ({ ...prev, evidenceInspectorOpen: Boolean(prev.selectedReviewTarget) }))}
                 />
@@ -537,7 +537,7 @@ export const App = () => {
                   selectedTarget={state.selectedReviewTarget}
                   resolutions={state.resolutions}
                   onResolutionChange={updateResolution}
-                  onSelectTarget={handleSelectTarget}
+                  onSelectTarget={(target) => handleSelectTarget(target, false)}
                   docked
                 />
               </aside>
